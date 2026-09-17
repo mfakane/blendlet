@@ -4,8 +4,9 @@ Hot-reloadable micro-tool host for Blender. A blendlet is a small Python file
 that can grow into a reusable tool without restarting Blender.
 
 This repository currently bootstraps the host add-on: package metadata,
-blendlets-directory preferences, and a start/stop lifecycle. File watching and
-module loading are follow-up work.
+blendlets-directory preferences, a start/stop lifecycle, and discovery of
+top-level ``.py`` blendlets with debounced create/modify/delete events. Module
+loading is follow-up work.
 
 ## Install
 
