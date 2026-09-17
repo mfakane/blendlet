@@ -36,6 +36,8 @@ def main() -> None:
 
     host = get_host()
     _assert(host.running, "installed add-on should start the host")
+    _assert(host.watching, "installed add-on should watch the blendlets directory")
+    _assert(host.is_timer_registered(), "installed add-on should register a discovery timer")
     _assert(
         host.blendlets_directory == resolve_blendlets_directory(""),
         f"empty preference should resolve to default, got {host.blendlets_directory}",
@@ -51,12 +53,16 @@ def main() -> None:
 
     addon_utils.disable(package)
     _assert(not host.running, "disable should stop the host")
+    _assert(not host.watching, "disable should stop watching")
+    _assert(not host.is_timer_registered(), "disable should unregister the discovery timer")
     _assert(host.blendlets_directory is None, "disable should clear the host directory")
     _assert(not BlendletPreferences.is_registered, "disable should unregister preferences")
 
     addon_utils.enable(package)
     host = get_host()
     _assert(host.running, "enable should start the host without restarting Blender")
+    _assert(host.watching, "enable should resume watching without restarting Blender")
+    _assert(host.is_timer_registered(), "enable should register the discovery timer again")
     _assert(
         host.blendlets_directory == custom,
         f"re-enable should keep the configured directory, got {host.blendlets_directory}",
