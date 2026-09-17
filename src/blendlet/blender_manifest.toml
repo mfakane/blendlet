@@ -1,0 +1,29 @@
+schema_version = "1.0.0"
+
+id = "blendlet"
+version = "0.1.0"
+name = "Blendlet"
+tagline = "Hot-reloadable micro-tool host for Blender"
+maintainer = "mfakane"
+type = "add-on"
+website = "https://gitlab.com/mfakane/blendlet"
+tags = ["Development", "Pipeline"]
+blender_version_min = "4.2.0"
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+copyright = [
+  "2026 mfakane",
+]
+
+[permissions]
+files = "Read blendlet Python files from a configured directory"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/*.zip",
+  "/tests/",
+  "/.gitlab-ci.yml",
+]

@@ -1,0 +1,5 @@
+test:
+  image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+  script:
+    - uv sync --frozen
+    - uv run python -m unittest discover -s tests -v

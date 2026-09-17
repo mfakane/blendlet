@@ -1,0 +1,15 @@
+[project]
+name = "blendlet"
+version = "0.1.0"
+description = "Hot-reloadable micro-tool host for Blender"
+readme = "README.md"
+authors = [
+    { name = "mfakane", email = "509998+mfakane@users.noreply.github.com" }
+]
+license = "GPL-3.0-or-later"
+requires-python = ">=3.13"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.12.4,<0.13.0"]
+build-backend = "uv_build"
