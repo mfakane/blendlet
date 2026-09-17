@@ -115,6 +115,55 @@ def main() -> None:
     _assert(host.discovered_files() == (), f"deleted file still discovered: {host.discovered_files()}")
     _assert_no_further_events(host, events, "delete")
 
+    import bpy
+
+    events.clear()
+    persistent = custom / "marker.py"
+    persistent.write_text(
+        "def register(ctx):\n"
+        "    import bpy\n"
+        "    bpy.app.driver_namespace['BLENDLET_MARKER'] = ctx.name\n"
+        "\n"
+        "def unregister(ctx):\n"
+        "    import bpy\n"
+        "    bpy.app.driver_namespace.pop('BLENDLET_MARKER', None)\n",
+        encoding="utf-8",
+    )
+    _wait_for_events(host, events, 1, "creating a persistent blendlet should emit one event")
+    _assert(
+        bpy.app.driver_namespace.get("BLENDLET_MARKER") == "marker",
+        "register(ctx) should run with ordinary bpy available",
+    )
+    _assert(
+        host.persistent_files() == (persistent,),
+        f"persistent files should be {(persistent,)}, got {host.persistent_files()}",
+    )
+
+    events.clear()
+    once = custom / "once.py"
+    once.write_text(
+        "from pathlib import Path\n"
+        "def run(ctx):\n"
+        "    Path(__file__).with_suffix('.out').write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    _wait_for_events(host, events, 1, "creating a transient blendlet should emit one event")
+    out = once.with_suffix(".out")
+    _assert(out.is_file() and out.read_text(encoding="utf-8") == "ran", "run(ctx) should execute")
+    _assert(
+        once not in host.persistent_files(),
+        f"run() script became persistent: {host.persistent_files()}",
+    )
+
+    events.clear()
+    persistent.unlink()
+    _wait_for_events(host, events, 1, "deleting a persistent blendlet should emit one event")
+    _assert(
+        "BLENDLET_MARKER" not in bpy.app.driver_namespace,
+        "unregister(ctx) should run when a persistent blendlet is deleted",
+    )
+    _assert(host.persistent_files() == (), f"deleted persistent still loaded: {host.persistent_files()}")
+
     blendlet.unregister()
     _assert(not host.running, "second unregister() should stop the host")
     _assert(not host.watching, "unregister() should stop watching")

@@ -11,22 +11,24 @@ from .discovery import (
     FileChange,
     Watcher,
 )
+from .lifecycle import Blendlet, Lifecycle
 
 
 class Host:
-    """Process-wide host that later tickets will attach loading to.
+    """Process-wide host for discovery and blendlet module lifecycle.
 
     ``stop()`` is the cleanup path: it is idempotent, and ``start()`` while
     already running goes through ``stop()`` first so leftover host state cannot
     accumulate across enable/disable cycles. Discovery watching is started and
-    stopped with the host; file events are delivered on the Blender timer
-    thread via ``subscribe``.
+    stopped with the host; file events load, reload, or unload modules, and
+    are also delivered on the Blender timer thread via ``subscribe``.
     """
 
     def __init__(self) -> None:
         self._running = False
         self._blendlets_directory: Path | None = None
         self._watcher: Watcher | None = None
+        self._lifecycle: Lifecycle | None = None
         self._listeners: list[Callable[[FileChange], None]] = []
         self._timer: Callable[[], float | None] | None = None
         self._poll_interval = DEFAULT_POLL_INTERVAL_SECONDS
@@ -48,6 +50,16 @@ class Host:
         if self._watcher is None:
             return ()
         return self._watcher.known_files()
+
+    def persistent_files(self) -> tuple[Path, ...]:
+        if self._lifecycle is None:
+            return ()
+        return self._lifecycle.persistent_files()
+
+    def loaded_blendlet(self, path: Path) -> Blendlet | None:
+        if self._lifecycle is None:
+            return None
+        return self._lifecycle.get(path)
 
     def subscribe(self, callback: Callable[[FileChange], None]) -> None:
         self._listeners.append(callback)
@@ -75,6 +87,7 @@ class Host:
             debounce_seconds=self._debounce_seconds,
             clock=clock,
         )
+        self._lifecycle = Lifecycle()
         self._running = True
         self._register_timer()
         self.poll()
@@ -83,6 +96,9 @@ class Host:
         if not self._running:
             return
         self._unregister_timer()
+        if self._lifecycle is not None:
+            self._lifecycle.unload_all()
+            self._lifecycle = None
         if self._watcher is not None:
             self._watcher.clear()
             self._watcher = None
@@ -119,6 +135,9 @@ class Host:
         return bool(bpy.app.timers.is_registered(self._timer))
 
     def _dispatch(self, changes: list[FileChange]) -> None:
+        if self._lifecycle is not None:
+            for change in changes:
+                self._lifecycle.handle(change)
         for change in changes:
             for listener in list(self._listeners):
                 listener(change)

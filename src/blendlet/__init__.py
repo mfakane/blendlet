@@ -1,4 +1,4 @@
-"""Blendlet host add-on: start/stop, directory config, and file discovery."""
+"""Blendlet host add-on: start/stop, discovery, and blendlet module lifecycle."""
 
 from __future__ import annotations
 
