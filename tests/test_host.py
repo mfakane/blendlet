@@ -279,6 +279,42 @@ class HostModuleLifecycleTests(unittest.TestCase):
         self.assertNotIn(name, sys.modules)
         self.assertEqual(_log_lines(path), ["register:tool", "unregister:tool"])
 
+    def test_reload_keeps_ctx_state(self):
+        path = self.directory / "brush.py"
+        path.write_text(
+            "def register(ctx):\n    ctx.state['radius'] = 12.0\n",
+            encoding="utf-8",
+        )
+        self._stable_poll()
+        path.write_text(
+            "def register(ctx):\n    ctx.radius = ctx.state.get('radius')\n",
+            encoding="utf-8",
+        )
+        self._stable_poll()
+        record = self.host.loaded_blendlet(path)
+        self.assertEqual(record.context.radius, 12.0)
+
+    def test_stop_and_start_drops_ctx_state(self):
+        path = self.directory / "brush.py"
+        path.write_text(
+            "def register(ctx):\n    ctx.state['radius'] = 12.0\n",
+            encoding="utf-8",
+        )
+        self._stable_poll()
+        self.host.stop()
+        path.write_text(
+            "def register(ctx):\n    ctx.radius = ctx.state.get('radius')\n",
+            encoding="utf-8",
+        )
+        self.host.start(
+            self.directory,
+            clock=self.clock,
+            debounce_seconds=DEFAULT_DEBOUNCE_SECONDS,
+        )
+        self._stable_poll()
+        record = self.host.loaded_blendlet(path)
+        self.assertIsNone(record.context.radius)
+
     def test_stop_disposes_owned_resources_without_unregister(self):
         path = self.directory / "owned.py"
         path.write_text(

@@ -503,3 +503,110 @@ class ResourceOwnershipTests(unittest.TestCase):
         self.assertFalse(path.with_suffix(".log").exists())
         self.lifecycle.handle(FileChange(ChangeKind.DELETED, path))
         self.assertEqual(path.with_suffix(".log").read_text(encoding="utf-8"), "disposed")
+
+
+WRITE_RADIUS = """\
+def register(ctx):
+    ctx.state["radius"] = {value}
+"""
+
+READ_RADIUS = """\
+def register(ctx):
+    ctx.radius = ctx.state.get("radius")
+"""
+
+
+class PersistentStateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.directory = Path(self.tmpdir.name).resolve()
+        self.lifecycle = Lifecycle()
+
+    def tearDown(self) -> None:
+        self.lifecycle.unload_all()
+        self.tmpdir.cleanup()
+
+    def _write(self, name: str, content: str) -> Path:
+        path = self.directory / name
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_primitive_values_survive_reload_on_a_new_context(self):
+        path = self._write("brush.py", WRITE_RADIUS.format(value=12.0))
+        first = self.lifecycle.load(path)
+        self.assertEqual(first.context.state["radius"], 12.0)
+        path.write_text(READ_RADIUS, encoding="utf-8")
+        second = self.lifecycle.reload(path)
+        self.assertIsNone(second.error)
+        self.assertIsNot(second.context, first.context)
+        self.assertTrue(first.context.disposed)
+        self.assertIs(second.context.state, first.context.state)
+        self.assertEqual(second.context.radius, 12.0)
+
+    def test_state_is_isolated_by_blendlet_path(self):
+        brush = self._write("brush.py", WRITE_RADIUS.format(value=12.0))
+        comb = self._write("comb.py", WRITE_RADIUS.format(value=3.0))
+        first = self.lifecycle.load(brush)
+        second = self.lifecycle.load(comb)
+        self.assertEqual(first.context.state["radius"], 12.0)
+        self.assertEqual(second.context.state["radius"], 3.0)
+        self.assertIsNot(first.context.state, second.context.state)
+
+    def test_same_filename_in_another_directory_does_not_collide(self):
+        other_dir = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(lambda: other_dir.joinpath("brush.py").unlink(missing_ok=True))
+        first_path = self._write("brush.py", WRITE_RADIUS.format(value=12.0))
+        second_path = other_dir / "brush.py"
+        second_path.write_text(WRITE_RADIUS.format(value=3.0), encoding="utf-8")
+        first = self.lifecycle.load(first_path)
+        second = self.lifecycle.load(second_path)
+        self.assertEqual(first.context.state["radius"], 12.0)
+        self.assertEqual(second.context.state["radius"], 3.0)
+        self.assertEqual(first.context.name, second.context.name)
+
+    def test_file_deletion_drops_state_for_a_recreated_file(self):
+        path = self._write("brush.py", WRITE_RADIUS.format(value=12.0))
+        self.lifecycle.handle(FileChange(ChangeKind.CREATED, path))
+        self.lifecycle.handle(FileChange(ChangeKind.DELETED, path))
+        path.write_text(READ_RADIUS, encoding="utf-8")
+        self.lifecycle.handle(FileChange(ChangeKind.CREATED, path))
+        record = self.lifecycle.get(path)
+        self.assertIsNone(record.context.state.get("radius"))
+        self.assertIsNone(record.context.radius)
+
+    def test_unload_all_drops_state(self):
+        path = self._write("brush.py", WRITE_RADIUS.format(value=12.0))
+        self.lifecycle.load(path)
+        self.lifecycle.unload_all()
+        path.write_text(READ_RADIUS, encoding="utf-8")
+        record = self.lifecycle.load(path)
+        self.assertIsNone(record.context.radius)
+
+    def test_failed_reload_keeps_state_with_last_good(self):
+        path = self._write("brush.py", WRITE_RADIUS.format(value=12.0))
+        first = self.lifecycle.load(path)
+        path.write_text(SYNTAX_ERROR, encoding="utf-8")
+        second = self.lifecycle.reload(path)
+        self.assertIs(second, first)
+        self.assertEqual(second.context.state["radius"], 12.0)
+
+    def test_transient_rerun_reuses_state_until_delete(self):
+        path = self._write(
+            "once.py",
+            "def run(ctx):\n"
+            "    ctx.state['hits'] = ctx.state.get('hits', 0) + 1\n"
+            "    ctx.hits = ctx.state['hits']\n",
+        )
+        first = self.lifecycle.load(path)
+        self.assertEqual(first.context.hits, 1)
+        second = self.lifecycle.reload(path)
+        self.assertEqual(second.context.hits, 2)
+        self.lifecycle.handle(FileChange(ChangeKind.DELETED, path))
+        path.write_text(
+            "def run(ctx):\n"
+            "    ctx.hits = ctx.state.get('hits', 0)\n",
+            encoding="utf-8",
+        )
+        third = self.lifecycle.load(path)
+        self.assertEqual(third.context.hits, 0)
+
