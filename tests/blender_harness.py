@@ -164,11 +164,110 @@ def main() -> None:
     )
     _assert(host.persistent_files() == (), f"deleted persistent still loaded: {host.persistent_files()}")
 
+    owned_source = (
+        "import bpy\n"
+        "from bpy.types import Operator\n"
+        "\n"
+        "class BLENDLET_OT_owned(Operator):\n"
+        "    bl_idname = 'blendlet.owned_probe'\n"
+        "    bl_label = 'Owned Probe'\n"
+        "    def execute(self, context):\n"
+        "        return {'FINISHED'}\n"
+        "\n"
+        "def tick():\n"
+        "    return 1.0\n"
+        "\n"
+        "def register(ctx):\n"
+        "    ctx.register_class(BLENDLET_OT_owned)\n"
+        "    ctx.add_timer(tick, persistent=True)\n"
+        "    bpy.app.driver_namespace['BLENDLET_OWNED_TIMER'] = tick\n"
+    )
+    events.clear()
+    owned = custom / "owned.py"
+    owned.write_text(owned_source, encoding="utf-8")
+    _wait_for_events(host, events, 1, "creating an owned-resource blendlet should emit one event")
+    owned_record = host.loaded_blendlet(owned)
+    _assert(owned_record is not None, "owned blendlet should be loaded")
+    _assert(
+        owned_record.error is None,
+        f"owned blendlet failed: {owned_record.error!r}",
+    )
+    _assert(owned_record.persistent, "owned blendlet should be persistent")
+    _assert(
+        owned_record.module.BLENDLET_OT_owned.is_registered,
+        "ctx.register_class should register the operator",
+    )
+    first_cls = owned_record.module.BLENDLET_OT_owned
+    owned_tick = bpy.app.driver_namespace.get("BLENDLET_OWNED_TIMER")
+    _assert(owned_tick is not None, "owned timer function should be recorded")
+    _assert(bpy.app.timers.is_registered(owned_tick), "ctx.add_timer should register a timer")
+
+    events.clear()
+    owned.write_text(owned_source + "\nMARKER = 1\n", encoding="utf-8")
+    _wait_for_events(host, events, 1, "modifying an owned-resource blendlet should emit one event")
+    owned_record = host.loaded_blendlet(owned)
+    _assert(owned_record is not None, "reloaded owned blendlet should be loaded")
+    _assert(
+        owned_record.error is None,
+        f"reload of owned blendlet failed: {owned_record.error!r}",
+    )
+    _assert(
+        owned_record.module.BLENDLET_OT_owned.is_registered,
+        "reloaded operator should stay registered once",
+    )
+    _assert(not first_cls.is_registered, "reload should unregister the previous operator class")
+    owned_cls = owned_record.module.BLENDLET_OT_owned
+    new_tick = bpy.app.driver_namespace.get("BLENDLET_OWNED_TIMER")
+    _assert(new_tick is not owned_tick, "reload should register a new timer function")
+    _assert(
+        not bpy.app.timers.is_registered(owned_tick),
+        "reload should unregister the previous timer",
+    )
+    _assert(bpy.app.timers.is_registered(new_tick), "reload should register the new timer")
+
+    events.clear()
+    owned.unlink()
+    _wait_for_events(host, events, 1, "deleting an owned-resource blendlet should emit one event")
+    _assert(host.loaded_blendlet(owned) is None, "deleted owned blendlet should unload")
+    _assert(
+        not owned_cls.is_registered,
+        "delete should unregister classes owned by ctx",
+    )
+    _assert(
+        not bpy.app.timers.is_registered(new_tick),
+        "delete should unregister timers owned by ctx",
+    )
+
+    events.clear()
+    disable_owned = custom / "disable_owned.py"
+    disable_owned.write_text(owned_source, encoding="utf-8")
+    _wait_for_events(host, events, 1, "creating a blendlet before disable should emit one event")
+    disable_record = host.loaded_blendlet(disable_owned)
+    _assert(disable_record is not None and disable_record.error is None, "disable blendlet should load")
+    disable_cls = disable_record.module.BLENDLET_OT_owned
+    disable_tick = bpy.app.driver_namespace.get("BLENDLET_OWNED_TIMER")
+    _assert(
+        disable_cls.is_registered,
+        "operator should be registered before disable",
+    )
+    _assert(
+        disable_tick is not None and bpy.app.timers.is_registered(disable_tick),
+        "timer should be registered before disable",
+    )
+
     blendlet.unregister()
     _assert(not host.running, "second unregister() should stop the host")
     _assert(not host.watching, "unregister() should stop watching")
     _assert(not host.is_timer_registered(), "unregister() should drop the discovery timer")
     _assert(not BlendletPreferences.is_registered, "preferences should unregister on disable")
+    _assert(
+        not disable_cls.is_registered,
+        "add-on disable should dispose classes owned by ctx",
+    )
+    _assert(
+        not bpy.app.timers.is_registered(disable_tick),
+        "add-on disable should dispose timers owned by ctx",
+    )
 
     events.clear()
     leftover = custom / "after-stop.py"

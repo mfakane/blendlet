@@ -279,3 +279,18 @@ class HostModuleLifecycleTests(unittest.TestCase):
         self.assertNotIn(name, sys.modules)
         self.assertEqual(_log_lines(path), ["register:tool", "unregister:tool"])
 
+    def test_stop_disposes_owned_resources_without_unregister(self):
+        path = self.directory / "owned.py"
+        path.write_text(
+            "from pathlib import Path\n"
+            "def register(ctx):\n"
+            "    log = Path(__file__).with_suffix('.log')\n"
+            "    ctx.add_cleanup(lambda: log.write_text('disposed', encoding='utf-8'))\n",
+            encoding="utf-8",
+        )
+        self._stable_poll()
+        self.assertFalse(path.with_suffix(".log").exists())
+        self.host.stop()
+        self.assertEqual(path.with_suffix(".log").read_text(encoding="utf-8"), "disposed")
+        self.assertEqual(self.host.persistent_files(), ())
+

@@ -29,6 +29,24 @@ define ``register(ctx)`` and may define ``unregister(ctx)``. One-shot scripts
 define ``run(ctx)`` instead; they execute on create/modify and are not kept as
 loaded add-ons. Ordinary ``bpy`` remains available.
 
+Register Blender resources through ``ctx`` so reload, delete, and add-on
+disable undo them automatically. A simple blendlet does not need
+``unregister()`` merely to tear down those resources. ``ctx.dispose()`` is
+idempotent and still runs after an optional ``unregister(ctx)``.
+
+```python
+import bpy
+
+
+def register(ctx):
+    ctx.register_class(MyOperator)
+    ctx.add_timer(tick, persistent=True)
+    km = ctx.add_keymap("3D View", space_type="VIEW_3D")
+    ctx.add_keymap_item(km, "mesh.knife_tool", type="K")
+    ctx.add_draw_handler(bpy.types.SpaceView3D, draw, ())
+    ctx.add_handler(bpy.app.handlers.depsgraph_update_post, on_update)
+```
+
 ## Tests
 
 ```text

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from blendlet.discovery import ChangeKind, FileChange
 from blendlet.lifecycle import Lifecycle, module_name_for
+from fakes import FakeBpy
 
 
 PERSISTENT = """\
@@ -230,3 +231,176 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(record.context.seen)
         self.lifecycle.unload(path)
         self.assertEqual(_modules_for(path), [])
+
+
+OWNED_CLASS = """\
+class Probe:
+    bl_idname = "blendlet.probe"
+
+
+def register(ctx):
+    ctx.register_class(Probe)
+"""
+
+OWNED_CLASS_WITH_UNREGISTER = """\
+from pathlib import Path
+
+LOG = Path(__file__).with_suffix(".log")
+
+
+def _append(line: str) -> None:
+    previous = LOG.read_text(encoding="utf-8") if LOG.exists() else ""
+    LOG.write_text(previous + line + "\\n", encoding="utf-8")
+
+
+class Probe:
+    bl_idname = "blendlet.probe"
+
+
+def register(ctx):
+    ctx.register_class(Probe)
+    _append("register")
+
+
+def unregister(ctx):
+    ctx.unregister_class(Probe)
+    _append("unregister")
+"""
+
+OWNED_THEN_RAISE = """\
+class Probe:
+    bl_idname = "blendlet.probe"
+
+
+def register(ctx):
+    ctx.register_class(Probe)
+    raise RuntimeError("boom")
+"""
+
+OWNED_RUN = """\
+class Probe:
+    bl_idname = "blendlet.probe"
+
+
+def run(ctx):
+    ctx.register_class(Probe)
+"""
+
+DISPOSE_IN_UNREGISTER = """\
+class Probe:
+    bl_idname = "blendlet.probe"
+
+
+def register(ctx):
+    ctx.register_class(Probe)
+
+
+def unregister(ctx):
+    ctx.dispose()
+"""
+
+
+class ResourceOwnershipTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.directory = Path(self.tmpdir.name).resolve()
+        self.bpy = FakeBpy()
+        self.lifecycle = Lifecycle(api=self.bpy)
+
+    def tearDown(self) -> None:
+        self.lifecycle.unload_all()
+        self.tmpdir.cleanup()
+
+    def _write(self, name: str, content: str) -> Path:
+        path = self.directory / name
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_owned_class_is_unregistered_without_an_unregister_hook(self):
+        path = self._write("tool.py", OWNED_CLASS)
+        record = self.lifecycle.load(path)
+        self.assertTrue(record.persistent)
+        self.assertEqual(self.bpy.utils.classes[0].bl_idname, "blendlet.probe")
+        self.lifecycle.unload(path)
+        self.assertEqual(self.bpy.utils.classes, [])
+        self.assertTrue(record.context.disposed)
+
+    def test_reload_does_not_leave_duplicate_classes(self):
+        path = self._write("tool.py", OWNED_CLASS)
+        self.lifecycle.load(path)
+        first = self.bpy.utils.classes[0]
+        path.write_text(OWNED_CLASS + "\nMARKER = 1\n", encoding="utf-8")
+        self.lifecycle.reload(path)
+        self.assertEqual(len(self.bpy.utils.classes), 1)
+        self.assertIsNot(self.bpy.utils.classes[0], first)
+        self.assertEqual(self.bpy.utils.classes[0].bl_idname, "blendlet.probe")
+
+    def test_two_blendlets_do_not_share_owned_resources(self):
+        first = self._write(
+            "a.py",
+            "class Probe:\n    bl_idname = 'blendlet.a'\ndef register(ctx):\n    ctx.register_class(Probe)\n",
+        )
+        second = self._write(
+            "b.py",
+            "class Probe:\n    bl_idname = 'blendlet.b'\ndef register(ctx):\n    ctx.register_class(Probe)\n",
+        )
+        self.lifecycle.load(first)
+        self.lifecycle.load(second)
+        self.assertEqual(
+            [cls.bl_idname for cls in self.bpy.utils.classes],
+            ["blendlet.a", "blendlet.b"],
+        )
+        self.lifecycle.unload(first)
+        self.assertEqual([cls.bl_idname for cls in self.bpy.utils.classes], ["blendlet.b"])
+        self.lifecycle.unload(second)
+        self.assertEqual(self.bpy.utils.classes, [])
+
+    def test_manual_unregister_coexists_with_automatic_dispose(self):
+        path = self._write("tool.py", OWNED_CLASS_WITH_UNREGISTER)
+        self.lifecycle.load(path)
+        self.lifecycle.unload(path)
+        self.assertEqual(self.bpy.utils.classes, [])
+        self.assertEqual(_log_lines(path), ["register", "unregister"])
+
+    def test_unregister_may_call_dispose_itself(self):
+        path = self._write("tool.py", DISPOSE_IN_UNREGISTER)
+        record = self.lifecycle.load(path)
+        self.lifecycle.unload(path)
+        self.assertEqual(self.bpy.utils.classes, [])
+        self.assertTrue(record.context.disposed)
+
+    def test_failed_register_disposes_partial_resources(self):
+        path = self._write("bad.py", OWNED_THEN_RAISE)
+        record = self.lifecycle.load(path)
+        self.assertIsInstance(record.error, RuntimeError)
+        self.assertFalse(record.persistent)
+        self.assertEqual(self.bpy.utils.classes, [])
+        self.assertTrue(record.context.disposed)
+
+    def test_transient_run_disposes_owned_resources(self):
+        path = self._write("once.py", OWNED_RUN)
+        record = self.lifecycle.load(path)
+        self.assertFalse(record.persistent)
+        self.assertEqual(self.bpy.utils.classes, [])
+        self.assertTrue(record.context.disposed)
+        self.assertEqual(_modules_for(path), [])
+
+    def test_unload_all_disposes_owned_resources(self):
+        path = self._write("tool.py", OWNED_CLASS)
+        self.lifecycle.load(path)
+        self.lifecycle.unload_all()
+        self.assertEqual(self.bpy.utils.classes, [])
+        self.assertEqual(self.lifecycle.persistent_files(), ())
+
+    def test_cleanup_without_unregister_runs_on_delete(self):
+        path = self._write(
+            "plain.py",
+            "def register(ctx):\n"
+            "    from pathlib import Path\n"
+            "    log = Path(__file__).with_suffix('.log')\n"
+            "    ctx.add_cleanup(lambda: log.write_text('disposed', encoding='utf-8'))\n",
+        )
+        self.lifecycle.load(path)
+        self.assertFalse(path.with_suffix(".log").exists())
+        self.lifecycle.handle(FileChange(ChangeKind.DELETED, path))
+        self.assertEqual(path.with_suffix(".log").read_text(encoding="utf-8"), "disposed")

@@ -7,10 +7,11 @@ Execution contract:
 * ``run(ctx)`` without ``register`` — transient one-shot; the module is dropped
   after ``run`` so it does not become a permanent add-on
 * ordinary ``bpy`` remains available; there is no custom operator DSL
+* resources registered through ``ctx`` are disposed automatically; a simple
+  blendlet does not need ``unregister()`` merely to undo those resources
 
-Resource tracking on ``ctx`` is a later ticket. Failed loads are recorded and
-do not stop the host; keeping a last-good version across a failed reload is
-also later work.
+Failed loads are recorded and do not stop the host; keeping a last-good
+version across a failed reload is later work.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from .context import Context
 from .discovery import ChangeKind, FileChange
 
 
@@ -28,14 +31,6 @@ def module_name_for(path: Path) -> str:
     """Stable unique ``sys.modules`` key for a blendlet path."""
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
     return f"_blendlet_mod_{digest}"
-
-
-class Context:
-    """Per-blendlet execution context passed to register/unregister/run."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = Path(path)
-        self.name = self.path.stem
 
 
 @dataclass
@@ -51,6 +46,13 @@ class Blendlet:
 def _drop_module(name: str | None) -> None:
     if name:
         sys.modules.pop(name, None)
+
+
+def _dispose(context: Context) -> None:
+    try:
+        context.dispose()
+    except Exception:
+        pass
 
 
 def import_blendlet(path: Path) -> tuple[str, types.ModuleType]:
@@ -78,8 +80,9 @@ def import_blendlet(path: Path) -> tuple[str, types.ModuleType]:
 class Lifecycle:
     """Apply file events to imported blendlet modules."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, api: Any = None) -> None:
         self._loaded: dict[Path, Blendlet] = {}
+        self._api = api
 
     def get(self, path: Path) -> Blendlet | None:
         return self._loaded.get(Path(path))
@@ -109,7 +112,7 @@ class Lifecycle:
         path = Path(path)
         if path in self._loaded:
             self.unload(path)
-        context = Context(path)
+        context = Context(path, api=self._api)
         record = Blendlet(path=path, context=context)
         self._loaded[path] = record
         try:
@@ -128,15 +131,15 @@ class Lifecycle:
                 record.persistent = True
             elif callable(run):
                 run(context)
-                _drop_module(name)
-                record.module = None
-                record.module_name = None
         except Exception as exc:
             record.error = exc
             record.persistent = False
-            _drop_module(name)
-            record.module = None
-            record.module_name = None
+        if not record.persistent:
+            _dispose(context)
+            if callable(register) or callable(run):
+                _drop_module(name)
+                record.module = None
+                record.module_name = None
         return record
 
     def reload(self, path: Path) -> Blendlet:
@@ -147,15 +150,18 @@ class Lifecycle:
         record = self._loaded.pop(Path(path), None)
         if record is None:
             return
-        module = record.module
-        if module is not None:
-            unregister = getattr(module, "unregister", None)
-            if callable(unregister):
-                try:
-                    unregister(record.context)
-                except Exception:
-                    pass
-        _drop_module(record.module_name)
+        try:
+            module = record.module
+            if module is not None:
+                unregister = getattr(module, "unregister", None)
+                if callable(unregister):
+                    try:
+                        unregister(record.context)
+                    except Exception:
+                        pass
+        finally:
+            _dispose(record.context)
+            _drop_module(record.module_name)
 
     def unload_all(self) -> None:
         for path in list(self._loaded):
