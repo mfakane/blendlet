@@ -22,6 +22,7 @@ class Host:
     accumulate across enable/disable cycles. Discovery watching is started and
     stopped with the host; file events load, reload, or unload modules, and
     are also delivered on the Blender timer thread via ``subscribe``.
+    Per-blendlet ``ctx.state`` is dropped on ``stop()`` and on file deletion.
     """
 
     def __init__(self) -> None:

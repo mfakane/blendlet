@@ -34,6 +34,12 @@ disable undo them automatically. A simple blendlet does not need
 ``unregister()`` merely to tear down those resources. ``ctx.dispose()`` is
 idempotent and still runs after an optional ``unregister(ctx)``.
 
+``ctx.state`` is a host-owned dict for small values such as a brush radius.
+It is keyed by blendlet path, so two files cannot share a slot. Values
+survive a hot reload of that file. Deleting the file, disabling the add-on,
+or restarting Blender drops the slot. v0.1 storage is in-memory; do not
+keep module-defined objects there.
+
 A syntax or import error while a persistent tool is already loaded keeps that
 last working version active. If the candidate imports but ``register()`` fails
 after the old version is disposed, the last working version is restored when
@@ -51,6 +57,8 @@ def register(ctx):
     ctx.add_keymap_item(km, "mesh.knife_tool", type="K")
     ctx.add_draw_handler(bpy.types.SpaceView3D, draw, ())
     ctx.add_handler(bpy.app.handlers.depsgraph_update_post, on_update)
+    radius = ctx.state.get("radius", 8.0)
+    ctx.state["radius"] = radius
 ```
 
 ## Tests

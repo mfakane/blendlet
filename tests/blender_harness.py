@@ -268,6 +268,53 @@ def main() -> None:
     )
 
     events.clear()
+    stateful = custom / "stateful.py"
+    stateful.write_text(
+        "def register(ctx):\n"
+        "    import bpy\n"
+        "    ctx.state['radius'] = 12.0\n"
+        "    bpy.app.driver_namespace['BLENDLET_STATE_RADIUS'] = ctx.state['radius']\n",
+        encoding="utf-8",
+    )
+    _wait_for_events(host, events, 1, "creating a stateful blendlet should emit one event")
+    _assert(
+        bpy.app.driver_namespace.get("BLENDLET_STATE_RADIUS") == 12.0,
+        "register(ctx) should store primitive state",
+    )
+
+    events.clear()
+    stateful.write_text(
+        "def register(ctx):\n"
+        "    import bpy\n"
+        "    bpy.app.driver_namespace['BLENDLET_STATE_RADIUS'] = ctx.state.get('radius')\n",
+        encoding="utf-8",
+    )
+    _wait_for_events(host, events, 1, "reloading a stateful blendlet should emit one event")
+    _assert(
+        bpy.app.driver_namespace.get("BLENDLET_STATE_RADIUS") == 12.0,
+        "ctx.state should survive a hot reload",
+    )
+
+    events.clear()
+    stateful.unlink()
+    _wait_for_events(host, events, 1, "deleting a stateful blendlet should emit one event")
+    stateful.write_text(
+        "def register(ctx):\n"
+        "    import bpy\n"
+        "    bpy.app.driver_namespace['BLENDLET_STATE_RADIUS'] = ctx.state.get('radius')\n",
+        encoding="utf-8",
+    )
+    events.clear()
+    _wait_for_events(host, events, 1, "recreating a stateful blendlet should emit one event")
+    _assert(
+        bpy.app.driver_namespace.get("BLENDLET_STATE_RADIUS") is None,
+        "file deletion should drop ctx.state",
+    )
+    stateful.unlink()
+    events.clear()
+    _wait_for_events(host, events, 1, "cleaning up the stateful blendlet should emit one event")
+
+    events.clear()
     owned.unlink()
     _wait_for_events(host, events, 1, "deleting an owned-resource blendlet should emit one event")
     _assert(host.loaded_blendlet(owned) is None, "deleted owned blendlet should unload")

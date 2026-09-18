@@ -68,6 +68,20 @@ class ContextOwnershipTests(unittest.TestCase):
         other.dispose()
         self.assertEqual(self.bpy.utils.classes, [])
 
+    def test_default_state_is_isolated_and_survives_dispose(self):
+        other = Context(Path("other.py"), api=self.bpy)
+        self.ctx.state["radius"] = 4.0
+        self.assertNotIn("radius", other.state)
+        self.ctx.dispose()
+        self.assertEqual(self.ctx.state["radius"], 4.0)
+
+    def test_injected_state_is_the_same_mapping(self):
+        slot = {"radius": 8.0}
+        ctx = Context(Path("brush.py"), api=self.bpy, state=slot)
+        ctx.state["radius"] = 12.0
+        self.assertEqual(slot["radius"], 12.0)
+        self.assertIs(ctx.state, slot)
+
     def test_timer_draw_handler_keymap_and_app_handler_are_owned(self):
         handle = self.ctx.add_draw_handler(self.bpy.types.SpaceView3D, _draw, ())
         self.ctx.add_timer(_tick, first_interval=0.1, persistent=True)

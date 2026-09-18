@@ -5,6 +5,10 @@ host-supported callbacks through ``ctx``. ``dispose()`` undoes those
 registrations, so a simple tool does not need ``unregister()`` merely to
 tear down resources it registered through the context.
 
+``ctx.state`` is a host-owned dict for primitive preferences. It survives
+hot reload for the same blendlet path; file deletion and host restart drop
+it. ``dispose()`` does not clear state.
+
 ``Lifecycle`` calls ``dispose()`` after optional ``unregister(ctx)``.
 ``dispose()`` is idempotent, so ``unregister`` may also call it.
 """
@@ -37,6 +41,7 @@ class Context:
 
     path: Path
     api: Any = field(default=None, repr=False, compare=False)
+    state: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     name: str = field(init=False)
     _owned: list[_Owned] = field(default_factory=list, init=False, repr=False)
     _disposed: bool = field(default=False, init=False, repr=False)

@@ -9,6 +9,8 @@ Execution contract:
 * ordinary ``bpy`` remains available; there is no custom operator DSL
 * resources registered through ``ctx`` are disposed automatically; a simple
   blendlet does not need ``unregister()`` merely to undo those resources
+* ``ctx.state`` is host-owned per blendlet path; it survives reload and is
+  dropped on file deletion and host restart
 
 Reloads stage a candidate module before replacing the active one. A
 syntax/import failure keeps the last working persistent tool. After the old
@@ -29,6 +31,7 @@ from typing import Any
 
 from .context import Context
 from .discovery import ChangeKind, FileChange
+from .state import StateStore
 
 
 def module_name_for(path: Path, generation: int = 0) -> str:
@@ -111,10 +114,11 @@ def import_blendlet(path: Path, *, name: str | None = None) -> tuple[str, types.
 class Lifecycle:
     """Apply file events to imported blendlet modules."""
 
-    def __init__(self, *, api: Any = None) -> None:
+    def __init__(self, *, api: Any = None, state_store: StateStore | None = None) -> None:
         self._loaded: dict[Path, Blendlet] = {}
         self._generations: dict[Path, int] = {}
         self._api = api
+        self._state_store = state_store if state_store is not None else StateStore()
 
     def get(self, path: Path) -> Blendlet | None:
         return self._loaded.get(Path(path))
@@ -138,7 +142,7 @@ class Lifecycle:
         elif change.kind is ChangeKind.MODIFIED:
             self.reload(change.path)
         elif change.kind is ChangeKind.DELETED:
-            self.unload(change.path)
+            self.unload(change.path, forget_state=True)
 
     def load(self, path: Path) -> Blendlet:
         path = Path(path)
@@ -155,15 +159,18 @@ class Lifecycle:
             self.unload(path)
         return self._load_fresh(path)
 
-    def unload(self, path: Path) -> None:
-        record = self._loaded.pop(Path(path), None)
-        if record is None:
-            return
-        self._teardown(record, drop_module=True)
+    def unload(self, path: Path, *, forget_state: bool = False) -> None:
+        path = Path(path)
+        record = self._loaded.pop(path, None)
+        if record is not None:
+            self._teardown(record, drop_module=True)
+        if forget_state:
+            self._state_store.drop(path)
 
     def unload_all(self) -> None:
         for path in list(self._loaded):
             self.unload(path)
+        self._state_store.clear()
 
     def _next_name(self, path: Path) -> str:
         generation = self._generations.get(path, 0)
@@ -173,8 +180,11 @@ class Lifecycle:
     def _import(self, path: Path) -> tuple[str, types.ModuleType]:
         return import_blendlet(path, name=self._next_name(path))
 
+    def _context(self, path: Path) -> Context:
+        return Context(path, api=self._api, state=self._state_store.for_path(path))
+
     def _load_fresh(self, path: Path) -> Blendlet:
-        context = Context(path, api=self._api)
+        context = self._context(path)
         record = Blendlet(path=path, context=context)
         self._loaded[path] = record
         try:
@@ -198,7 +208,7 @@ class Lifecycle:
             return current
 
         self._teardown(current, drop_module=False)
-        candidate = Blendlet(path=current.path, context=Context(current.path, api=self._api))
+        candidate = Blendlet(path=current.path, context=self._context(current.path))
         self._loaded[current.path] = candidate
         try:
             self._activate(candidate, name, module)
@@ -254,7 +264,7 @@ class Lifecycle:
         module_name: str | None,
         error: BaseException,
     ) -> Blendlet:
-        last_good.context = Context(last_good.path, api=self._api)
+        last_good.context = self._context(last_good.path)
         last_good.module = module
         last_good.module_name = module_name
         last_good.persistent = False
