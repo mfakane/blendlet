@@ -46,6 +46,17 @@ after the old version is disposed, the last working version is restored when
 that restoration succeeds. Failures keep an exception and traceback on the
 loaded record.
 
+The host writes machine-readable status to
+``<blendlets-directory>/.blendlet/status.json`` so a coding agent can drop a
+``.py`` file, wait for the debounce window, and tell whether the latest
+contents loaded. ``file_hash`` is the SHA-256 of the last attempted source
+(or of a still-debouncing write). ``state`` is ``reloading``, ``loaded``,
+``ran``, or ``error``. When a reload fails and last-good stays active,
+``last_good`` is true, ``active`` is true, ``file_hash`` is the failed
+candidate, and ``active_hash`` is the running last-good source. Tracebacks
+are in the JSON ``error`` object and in
+``.blendlet/errors/<name>.txt``.
+
 ```python
 import bpy
 

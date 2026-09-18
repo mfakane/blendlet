@@ -31,6 +31,14 @@ class FileChange:
     path: Path
 
 
+@dataclass(frozen=True)
+class PendingFile:
+    """A blendlet whose fingerprint has not been stable long enough to emit."""
+
+    path: Path
+    fingerprint: str | None
+
+
 @dataclass
 class _Pending:
     fingerprint: object
@@ -106,6 +114,16 @@ class Watcher:
 
     def known_files(self) -> tuple[Path, ...]:
         return tuple(sorted(self._emitted, key=lambda path: path.as_posix()))
+
+    def pending_files(self) -> tuple[PendingFile, ...]:
+        items: list[PendingFile] = []
+        for path in sorted(self._pending, key=lambda item: item.as_posix()):
+            fingerprint = self._pending[path].fingerprint
+            if fingerprint is _UNREADABLE or not isinstance(fingerprint, str):
+                items.append(PendingFile(path=path, fingerprint=None))
+            else:
+                items.append(PendingFile(path=path, fingerprint=fingerprint))
+        return tuple(items)
 
     def clear(self) -> None:
         self._emitted.clear()

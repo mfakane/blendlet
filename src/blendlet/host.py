@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .discovery import (
     DEFAULT_DEBOUNCE_SECONDS,
     DEFAULT_POLL_INTERVAL_SECONDS,
     FileChange,
+    PendingFile,
     Watcher,
 )
 from .lifecycle import Blendlet, Lifecycle
+from .status import write_status
 
 
 class Host:
@@ -23,6 +26,8 @@ class Host:
     stopped with the host; file events load, reload, or unload modules, and
     are also delivered on the Blender timer thread via ``subscribe``.
     Per-blendlet ``ctx.state`` is dropped on ``stop()`` and on file deletion.
+    After each poll the host writes ``.blendlet/status.json`` so an external
+    agent can observe load success and reload errors from files alone.
     """
 
     def __init__(self) -> None:
@@ -34,6 +39,7 @@ class Host:
         self._timer: Callable[[], float | None] | None = None
         self._poll_interval = DEFAULT_POLL_INTERVAL_SECONDS
         self._debounce_seconds = DEFAULT_DEBOUNCE_SECONDS
+        self._status_signature: str | None = None
 
     @property
     def running(self) -> bool:
@@ -90,7 +96,9 @@ class Host:
         )
         self._lifecycle = Lifecycle()
         self._running = True
+        self._status_signature = None
         self._register_timer()
+        self._write_status()
         self.poll()
 
     def stop(self) -> None:
@@ -100,11 +108,13 @@ class Host:
         if self._lifecycle is not None:
             self._lifecycle.unload_all()
             self._lifecycle = None
+        self._write_status(running=False)
         if self._watcher is not None:
             self._watcher.clear()
             self._watcher = None
         self._cleanup()
         self._running = False
+        self._status_signature = None
 
     def set_blendlets_directory(self, blendlets_directory: Path) -> None:
         directory = Path(blendlets_directory)
@@ -114,8 +124,12 @@ class Host:
             raise RuntimeError("host is not running")
         if directory == self._blendlets_directory:
             return
+        previous = self._blendlets_directory
         changes = self._watcher.set_directory(directory)
+        if previous is not None and previous != directory:
+            self._write_status(directory=previous, running=False, records=(), pending=())
         self._blendlets_directory = directory
+        self._status_signature = None
         self._dispatch(changes)
         self.poll()
 
@@ -124,6 +138,7 @@ class Host:
             return []
         changes = self._watcher.poll()
         self._dispatch(changes)
+        self._write_status()
         return changes
 
     def is_timer_registered(self) -> bool:
@@ -176,6 +191,42 @@ class Host:
 
     def _cleanup(self) -> None:
         self._blendlets_directory = None
+
+    def _write_status(
+        self,
+        *,
+        directory: Path | None = None,
+        running: bool | None = None,
+        records: tuple[Blendlet, ...] | None = None,
+        pending: tuple[PendingFile, ...] | None = None,
+    ) -> None:
+        target = directory if directory is not None else self._blendlets_directory
+        if target is None:
+            return
+        is_running = self._running if running is None else running
+        if records is None:
+            if is_running and self._lifecycle is not None:
+                records = self._lifecycle.blendlets()
+            else:
+                records = ()
+        if pending is None:
+            if is_running and self._watcher is not None:
+                pending = self._watcher.pending_files()
+            else:
+                pending = ()
+        try:
+            _path, signature, _written = write_status(
+                target,
+                running=is_running,
+                records=records,
+                pending=pending,
+                now=datetime.now(timezone.utc),
+                previous_signature=self._status_signature if directory is None else None,
+            )
+        except OSError:
+            return
+        if directory is None:
+            self._status_signature = signature
 
 
 _host: Host | None = None

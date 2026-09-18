@@ -8,7 +8,9 @@ from blendlet.discovery import (
     DEFAULT_DEBOUNCE_SECONDS,
     ChangeKind,
     FileChange,
+    PendingFile,
     Watcher,
+    fingerprint_file,
     is_blendlet_name,
 )
 
@@ -64,6 +66,17 @@ class WatcherTests(unittest.TestCase):
         events = self._stable_poll()
         self.assertEqual(events, [FileChange(ChangeKind.CREATED, path)])
         self.assertEqual(self.watcher.known_files(), (path,))
+
+    def test_unstable_file_is_pending_until_debounce_elapses(self):
+        path = self._write("brush.py", "print(1)\n")
+        self.assertEqual(self.watcher.poll(), [])
+        self.assertEqual(
+            self.watcher.pending_files(),
+            (PendingFile(path=path, fingerprint=fingerprint_file(path)),),
+        )
+        self.clock.advance(DEFAULT_DEBOUNCE_SECONDS)
+        self.assertEqual(self.watcher.poll(), [FileChange(ChangeKind.CREATED, path)])
+        self.assertEqual(self.watcher.pending_files(), ())
 
     def test_ignores_non_python_and_nested_files(self):
         self._write("readme.txt", "nope\n")

@@ -5,6 +5,7 @@ blender --background --factory-startup --python tests/blender_harness.py
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import time
@@ -41,6 +42,13 @@ def _assert_no_further_events(host, collected, label: str) -> None:
     time.sleep(0.5)
     host.poll()
     _assert(len(collected) == 1, f"{label} produced extra events: {collected}")
+
+
+def _status_entry(status_path: Path, name: str) -> dict:
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    matches = [item for item in payload["blendlets"] if item["name"] == name]
+    _assert(len(matches) == 1, f"expected one {name!r} status entry, got {payload}")
+    return matches[0]
 
 
 def main() -> None:
@@ -138,6 +146,13 @@ def main() -> None:
         host.persistent_files() == (persistent,),
         f"persistent files should be {(persistent,)}, got {host.persistent_files()}",
     )
+    status_path = custom / ".blendlet" / "status.json"
+    _assert(status_path.is_file(), "status.json should exist after a successful load")
+    marker_status = _status_entry(status_path, "marker")
+    _assert(marker_status["state"] == "loaded", f"expected loaded, got {marker_status}")
+    _assert(marker_status["active"] is True, f"loaded tool should be active: {marker_status}")
+    _assert(marker_status["last_good"] is False, f"successful load is not last-good: {marker_status}")
+    _assert(marker_status["error"] is None, f"successful load should have no error: {marker_status}")
 
     events.clear()
     once = custom / "once.py"
@@ -246,6 +261,20 @@ def main() -> None:
         bpy.app.timers.is_registered(last_good_tick),
         "syntax error must not drop last-good timer",
     )
+    owned_status = _status_entry(status_path, "owned")
+    _assert(owned_status["state"] == "error", f"syntax-failed reload should be error: {owned_status}")
+    _assert(owned_status["active"] is True, f"last-good should stay active: {owned_status}")
+    _assert(owned_status["last_good"] is True, f"syntax-failed reload should flag last-good: {owned_status}")
+    _assert(
+        owned_status["error"] is not None and owned_status["error"]["type"] == "SyntaxError",
+        f"status should expose SyntaxError, got {owned_status}",
+    )
+    owned_error = custom / ".blendlet" / "errors" / "owned.txt"
+    _assert(owned_error.is_file(), "syntax-failed reload should write an error sidecar")
+    _assert(
+        "SyntaxError" in owned_error.read_text(encoding="utf-8"),
+        "error sidecar should include SyntaxError",
+    )
 
     events.clear()
     owned.write_text(owned_source.rstrip() + "\n    raise RuntimeError('boom')\n", encoding="utf-8")
@@ -346,6 +375,9 @@ def main() -> None:
 
     blendlet.unregister()
     _assert(not host.running, "second unregister() should stop the host")
+    stopped = json.loads(status_path.read_text(encoding="utf-8"))
+    _assert(stopped["host"]["running"] is False, f"stopped host should write running false: {stopped}")
+    _assert(stopped["blendlets"] == [], f"stopped host should clear blendlets: {stopped}")
     _assert(not host.watching, "unregister() should stop watching")
     _assert(not host.is_timer_registered(), "unregister() should drop the discovery timer")
     _assert(not BlendletPreferences.is_registered, "preferences should unregister on disable")
