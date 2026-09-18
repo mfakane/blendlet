@@ -29,6 +29,11 @@ class FakeUtils:
     def register_class(self, cls: type) -> None:
         if cls in self.classes:
             raise ValueError(f"{cls} already registered")
+        bl_idname = getattr(cls, "bl_idname", None)
+        if bl_idname is not None:
+            for existing in self.classes:
+                if getattr(existing, "bl_idname", None) == bl_idname:
+                    raise ValueError(f"{bl_idname} already registered")
         self.classes.append(cls)
 
     def unregister_class(self, cls: type) -> None:

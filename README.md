@@ -34,6 +34,12 @@ disable undo them automatically. A simple blendlet does not need
 ``unregister()`` merely to tear down those resources. ``ctx.dispose()`` is
 idempotent and still runs after an optional ``unregister(ctx)``.
 
+A syntax or import error while a persistent tool is already loaded keeps that
+last working version active. If the candidate imports but ``register()`` fails
+after the old version is disposed, the last working version is restored when
+that restoration succeeds. Failures keep an exception and traceback on the
+loaded record.
+
 ```python
 import bpy
 

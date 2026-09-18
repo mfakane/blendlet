@@ -225,6 +225,48 @@ def main() -> None:
     )
     _assert(bpy.app.timers.is_registered(new_tick), "reload should register the new timer")
 
+    last_good_cls = owned_cls
+    last_good_tick = new_tick
+    events.clear()
+    owned.write_text("def register(ctx):\n    $$$\n", encoding="utf-8")
+    _wait_for_events(host, events, 1, "syntax-error reload should emit one event")
+    owned_record = host.loaded_blendlet(owned)
+    _assert(owned_record is not None, "syntax-failed reload should keep the blendlet")
+    _assert(owned_record.persistent, "syntax-failed reload should keep last-good persistent")
+    _assert(
+        isinstance(owned_record.error, SyntaxError),
+        f"syntax-failed reload should record SyntaxError, got {owned_record.error!r}",
+    )
+    _assert(
+        owned_record.error_traceback is not None and str(owned) in owned_record.error_traceback,
+        "syntax-failed reload should include the blendlet path in the traceback",
+    )
+    _assert(last_good_cls.is_registered, "syntax error must not unregister last-good")
+    _assert(
+        bpy.app.timers.is_registered(last_good_tick),
+        "syntax error must not drop last-good timer",
+    )
+
+    events.clear()
+    owned.write_text(owned_source.rstrip() + "\n    raise RuntimeError('boom')\n", encoding="utf-8")
+    _wait_for_events(host, events, 1, "failed-register reload should emit one event")
+    owned_record = host.loaded_blendlet(owned)
+    _assert(owned_record is not None, "failed-register reload should keep the blendlet")
+    _assert(owned_record.persistent, "failed register should restore last-good")
+    _assert(
+        isinstance(owned_record.error, RuntimeError) and str(owned_record.error) == "boom",
+        f"failed-register reload should record RuntimeError, got {owned_record.error!r}",
+    )
+    _assert(
+        owned_record.error_traceback is not None and "boom" in owned_record.error_traceback,
+        "failed-register reload should include an actionable traceback",
+    )
+    _assert(last_good_cls.is_registered, "failed register should restore last-good operator")
+    _assert(
+        bpy.app.timers.is_registered(last_good_tick),
+        "failed register should restore last-good timer",
+    )
+
     events.clear()
     owned.unlink()
     _wait_for_events(host, events, 1, "deleting an owned-resource blendlet should emit one event")
