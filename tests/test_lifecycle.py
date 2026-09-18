@@ -196,6 +196,9 @@ class LifecycleTests(unittest.TestCase):
         loaded = self.lifecycle.load(good)
         self.assertIsInstance(failed.error, SyntaxError)
         self.assertFalse(failed.persistent)
+        self.assertIsNotNone(failed.error_traceback)
+        self.assertIn("SyntaxError", failed.error_traceback)
+        self.assertIn(str(broken), failed.error_traceback)
         self.assertIsNone(loaded.error)
         self.assertTrue(loaded.persistent)
         self.assertEqual(self.lifecycle.persistent_files(), (good,))
@@ -206,6 +209,8 @@ class LifecycleTests(unittest.TestCase):
         record = self.lifecycle.load(path)
         self.assertIsInstance(record.error, RuntimeError)
         self.assertEqual(str(record.error), "boom")
+        self.assertIsNotNone(record.error_traceback)
+        self.assertIn("boom", record.error_traceback)
         self.assertFalse(record.persistent)
         self.assertEqual(_modules_for(path), [])
         self.assertNotIn(module_name_for(path), sys.modules)
@@ -221,6 +226,73 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.lifecycle.persistent_files(), ())
         self.assertEqual(_modules_for(first), [])
         self.assertEqual(_modules_for(second), [])
+
+    def test_syntax_error_on_reload_keeps_last_good(self):
+        path = self._write("brush.py", PERSISTENT.format(value=1))
+        first = self.lifecycle.load(path)
+        path.write_text(SYNTAX_ERROR, encoding="utf-8")
+        second = self.lifecycle.reload(path)
+        self.assertIs(second, first)
+        self.assertTrue(second.persistent)
+        self.assertEqual(second.module.VALUE, 1)
+        self.assertIsInstance(second.error, SyntaxError)
+        self.assertIsNotNone(second.error_traceback)
+        self.assertIn("SyntaxError", second.error_traceback)
+        self.assertIn(str(path), second.error_traceback)
+        self.assertEqual(_log_lines(path), ["register:brush:1"])
+        self.assertEqual(self.lifecycle.persistent_files(), (path,))
+        self.assertEqual(_modules_for(path), [second.module_name])
+
+    def test_import_error_on_reload_keeps_last_good(self):
+        path = self._write("brush.py", PERSISTENT.format(value=1))
+        self.lifecycle.load(path)
+        path.write_text(
+            "import blendlet_missing_module_for_reload\n\ndef register(ctx):\n    pass\n",
+            encoding="utf-8",
+        )
+        record = self.lifecycle.reload(path)
+        self.assertTrue(record.persistent)
+        self.assertEqual(record.module.VALUE, 1)
+        self.assertIsInstance(record.error, ModuleNotFoundError)
+        self.assertIn("blendlet_missing_module_for_reload", record.error_traceback)
+        self.assertEqual(_log_lines(path), ["register:brush:1"])
+        self.assertEqual(_modules_for(path), [record.module_name])
+
+    def test_failed_register_on_reload_restores_last_good(self):
+        path = self._write("brush.py", PERSISTENT.format(value=1))
+        first = self.lifecycle.load(path)
+        old_module = first.module
+        path.write_text(RAISING_REGISTER, encoding="utf-8")
+        second = self.lifecycle.reload(path)
+        self.assertTrue(second.persistent)
+        self.assertEqual(second.module.VALUE, 1)
+        self.assertIs(second.module, old_module)
+        self.assertIsInstance(second.error, RuntimeError)
+        self.assertEqual(str(second.error), "boom")
+        self.assertIn("RuntimeError", second.error_traceback)
+        self.assertIn("boom", second.error_traceback)
+        self.assertEqual(
+            _log_lines(path),
+            ["register:brush:1", "unregister:brush", "register:brush:1"],
+        )
+        self.assertEqual(_modules_for(path), [second.module_name])
+
+    def test_successful_reload_after_failed_staging_replaces_last_good(self):
+        path = self._write("brush.py", PERSISTENT.format(value=1))
+        first = self.lifecycle.load(path)
+        path.write_text(SYNTAX_ERROR, encoding="utf-8")
+        self.lifecycle.reload(path)
+        path.write_text(PERSISTENT.format(value=7), encoding="utf-8")
+        second = self.lifecycle.reload(path)
+        self.assertIsNone(second.error)
+        self.assertIsNone(second.error_traceback)
+        self.assertEqual(second.module.VALUE, 7)
+        self.assertIsNot(second.module, first.module)
+        self.assertEqual(
+            _log_lines(path),
+            ["register:brush:1", "unregister:brush", "register:brush:7"],
+        )
+        self.assertEqual(_modules_for(path), [second.module_name])
 
     def test_optional_unregister_is_skipped_when_absent(self):
         path = self._write(
@@ -391,6 +463,33 @@ class ResourceOwnershipTests(unittest.TestCase):
         self.lifecycle.unload_all()
         self.assertEqual(self.bpy.utils.classes, [])
         self.assertEqual(self.lifecycle.persistent_files(), ())
+
+    def test_syntax_error_on_reload_keeps_owned_class(self):
+        path = self._write("tool.py", OWNED_CLASS)
+        record = self.lifecycle.load(path)
+        first = self.bpy.utils.classes[0]
+        path.write_text(SYNTAX_ERROR, encoding="utf-8")
+        second = self.lifecycle.reload(path)
+        self.assertIsInstance(second.error, SyntaxError)
+        self.assertTrue(second.persistent)
+        self.assertEqual(self.bpy.utils.classes, [first])
+        self.assertFalse(record.context.disposed)
+
+    def test_failed_register_on_reload_restores_owned_class(self):
+        path = self._write("tool.py", OWNED_CLASS)
+        first_record = self.lifecycle.load(path)
+        first = self.bpy.utils.classes[0]
+        old_module = first_record.module
+        old_context = first_record.context
+        path.write_text(OWNED_THEN_RAISE, encoding="utf-8")
+        second = self.lifecycle.reload(path)
+        self.assertIsInstance(second.error, RuntimeError)
+        self.assertTrue(second.persistent)
+        self.assertEqual(self.bpy.utils.classes, [first])
+        self.assertIs(second.module, old_module)
+        self.assertTrue(old_context.disposed)
+        self.assertIsNot(second.context, old_context)
+        self.assertFalse(second.context.disposed)
 
     def test_cleanup_without_unregister_runs_on_delete(self):
         path = self._write(
