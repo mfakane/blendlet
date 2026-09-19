@@ -129,6 +129,20 @@ class Watcher:
         self._emitted.clear()
         self._pending.clear()
 
+    def acknowledge(self, path: Path) -> None:
+        """Treat the current on-disk fingerprint as already emitted.
+
+        Manual reload/enable uses this so the next poll does not emit a second
+        create/modify for the same contents.
+        """
+        path = Path(path)
+        self._pending.pop(path, None)
+        fingerprint = self._read_fingerprint(path)
+        if fingerprint is None:
+            self._emitted.pop(path, None)
+        else:
+            self._emitted[path] = fingerprint
+
     def set_directory(self, directory: Path) -> list[FileChange]:
         """Retarget the watcher. Currently known files are deleted immediately."""
         events = [

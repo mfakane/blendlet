@@ -24,6 +24,11 @@ Directory** in its preferences. An empty value resolves to `~/blendlets`.
 Disable the add-on to stop the host. Enable it again without restarting Blender
 to start it with the current preferences.
 
+The 3D View sidebar (N-panel, **Blendlet** tab) lists discovered blendlets,
+whether the latest edit loaded, failed, or is disabled, and the latest reload
+error. Reload or enable/disable a tool from there. The configured blendlets
+directory is shown and can be opened in the file browser.
+
 A blendlet is a top-level ``.py`` file in that directory. Persistent tools
 define ``register(ctx)`` and may define ``unregister(ctx)``. One-shot scripts
 define ``run(ctx)`` instead; they execute on create/modify and are not kept as

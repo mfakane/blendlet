@@ -9,12 +9,13 @@ from pathlib import Path
 from .discovery import (
     DEFAULT_DEBOUNCE_SECONDS,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    ChangeKind,
     FileChange,
     PendingFile,
     Watcher,
 )
 from .lifecycle import Blendlet, Lifecycle
-from .status import write_status
+from .status import build_status, write_status
 
 
 class Host:
@@ -28,6 +29,8 @@ class Host:
     Per-blendlet ``ctx.state`` is dropped on ``stop()`` and on file deletion.
     After each poll the host writes ``.blendlet/status.json`` so an external
     agent can observe load success and reload errors from files alone.
+    Disabled blendlets stay discovered but are not auto-loaded until enabled
+    or manually reloaded. Disable is in-memory for the current host run.
     """
 
     def __init__(self) -> None:
@@ -40,6 +43,7 @@ class Host:
         self._poll_interval = DEFAULT_POLL_INTERVAL_SECONDS
         self._debounce_seconds = DEFAULT_DEBOUNCE_SECONDS
         self._status_signature: str | None = None
+        self._disabled: set[Path] = set()
 
     @property
     def running(self) -> bool:
@@ -68,8 +72,35 @@ class Host:
             return None
         return self._lifecycle.get(path)
 
+    def disabled_files(self) -> tuple[Path, ...]:
+        return tuple(sorted(self._disabled, key=lambda path: path.as_posix()))
+
+    def is_disabled(self, path: Path) -> bool:
+        return Path(path) in self._disabled
+
     def subscribe(self, callback: Callable[[FileChange], None]) -> None:
         self._listeners.append(callback)
+
+    def status_snapshot(self) -> dict:
+        directory = self._blendlets_directory
+        if directory is None:
+            directory = Path()
+        if self._running and self._lifecycle is not None:
+            records = self._lifecycle.blendlets()
+        else:
+            records = ()
+        if self._running and self._watcher is not None:
+            pending = self._watcher.pending_files()
+        else:
+            pending = ()
+        return build_status(
+            blendlets_directory=directory,
+            running=self._running,
+            records=records,
+            pending=pending,
+            disabled=self.disabled_files() if self._running else (),
+            now=datetime.now(timezone.utc),
+        )
 
     def start(
         self,
@@ -95,6 +126,7 @@ class Host:
             clock=clock,
         )
         self._lifecycle = Lifecycle()
+        self._disabled = set()
         self._running = True
         self._status_signature = None
         self._register_timer()
@@ -112,6 +144,7 @@ class Host:
         if self._watcher is not None:
             self._watcher.clear()
             self._watcher = None
+        self._disabled = set()
         self._cleanup()
         self._running = False
         self._status_signature = None
@@ -127,7 +160,13 @@ class Host:
         previous = self._blendlets_directory
         changes = self._watcher.set_directory(directory)
         if previous is not None and previous != directory:
-            self._write_status(directory=previous, running=False, records=(), pending=())
+            self._write_status(
+                directory=previous,
+                running=False,
+                records=(),
+                pending=(),
+                disabled=(),
+            )
         self._blendlets_directory = directory
         self._status_signature = None
         self._dispatch(changes)
@@ -139,7 +178,50 @@ class Host:
         changes = self._watcher.poll()
         self._dispatch(changes)
         self._write_status()
+        _tag_ui_redraw()
         return changes
+
+    def reload_now(self, path: Path) -> Blendlet | None:
+        """Load current disk contents immediately, re-enabling the blendlet."""
+        self._require_running()
+        record = self._reload_path(Path(path))
+        self._write_status()
+        _tag_ui_redraw()
+        return record
+
+    def reload_all(self) -> None:
+        """Reload every discovered blendlet from disk, re-enabling each one."""
+        self._require_running()
+        assert self._lifecycle is not None
+        paths = set(self.discovered_files())
+        if self._watcher is not None:
+            for item in self._watcher.pending_files():
+                paths.add(item.path)
+        self._disabled.clear()
+        for path in sorted(paths, key=lambda item: item.as_posix()):
+            self._reload_path(path)
+        self._write_status()
+        _tag_ui_redraw()
+
+    def disable(self, path: Path) -> None:
+        """Unload a blendlet and ignore later create/modify events for it."""
+        self._require_running()
+        assert self._lifecycle is not None
+        path = Path(path)
+        self._disabled.add(path)
+        self._lifecycle.unload(path)
+        self._write_status()
+        _tag_ui_redraw()
+
+    def enable(self, path: Path) -> Blendlet | None:
+        """Load a previously disabled blendlet from disk."""
+        self._require_running()
+        path = Path(path)
+        self._disabled.discard(path)
+        record = self._reload_path(path) if path.is_file() else None
+        self._write_status()
+        _tag_ui_redraw()
+        return record
 
     def is_timer_registered(self) -> bool:
         if self._timer is None:
@@ -150,9 +232,30 @@ class Host:
             return False
         return bool(bpy.app.timers.is_registered(self._timer))
 
+    def _require_running(self) -> None:
+        if not self._running or self._lifecycle is None:
+            raise RuntimeError("host is not running")
+
+    def _reload_path(self, path: Path) -> Blendlet | None:
+        assert self._lifecycle is not None
+        path = Path(path)
+        self._disabled.discard(path)
+        if self._watcher is not None:
+            self._watcher.acknowledge(path)
+        if not path.is_file():
+            self._lifecycle.unload(path, forget_state=True)
+            return None
+        return self._lifecycle.reload(path)
+
     def _dispatch(self, changes: list[FileChange]) -> None:
         if self._lifecycle is not None:
             for change in changes:
+                if change.kind is ChangeKind.DELETED:
+                    self._disabled.discard(change.path)
+                    self._lifecycle.handle(change)
+                    continue
+                if change.path in self._disabled:
+                    continue
                 self._lifecycle.handle(change)
         for change in changes:
             for listener in list(self._listeners):
@@ -199,6 +302,7 @@ class Host:
         running: bool | None = None,
         records: tuple[Blendlet, ...] | None = None,
         pending: tuple[PendingFile, ...] | None = None,
+        disabled: tuple[Path, ...] | None = None,
     ) -> None:
         target = directory if directory is not None else self._blendlets_directory
         if target is None:
@@ -214,12 +318,15 @@ class Host:
                 pending = self._watcher.pending_files()
             else:
                 pending = ()
+        if disabled is None:
+            disabled = self.disabled_files() if is_running else ()
         try:
             _path, signature, _written = write_status(
                 target,
                 running=is_running,
                 records=records,
                 pending=pending,
+                disabled=disabled,
                 now=datetime.now(timezone.utc),
                 previous_signature=self._status_signature if directory is None else None,
             )
@@ -227,6 +334,23 @@ class Host:
             return
         if directory is None:
             self._status_signature = signature
+
+
+def _tag_ui_redraw() -> None:
+    try:
+        import bpy
+    except ImportError:
+        return
+    window_manager = getattr(getattr(bpy, "context", None), "window_manager", None)
+    if window_manager is None:
+        return
+    for window in getattr(window_manager, "windows", []):
+        screen = getattr(window, "screen", None)
+        if screen is None:
+            continue
+        for area in getattr(screen, "areas", []):
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
 
 
 _host: Host | None = None

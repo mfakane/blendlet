@@ -78,6 +78,20 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(self.watcher.poll(), [FileChange(ChangeKind.CREATED, path)])
         self.assertEqual(self.watcher.pending_files(), ())
 
+    def test_acknowledge_clears_pending_and_skips_the_same_contents(self):
+        path = self._write("brush.py", "print(1)\n")
+        self.assertEqual(self.watcher.poll(), [])
+        self.assertEqual(len(self.watcher.pending_files()), 1)
+        self.watcher.acknowledge(path)
+        self.assertEqual(self.watcher.pending_files(), ())
+        self.assertEqual(self.watcher.known_files(), (path,))
+        self.clock.advance(DEFAULT_DEBOUNCE_SECONDS)
+        self.assertEqual(self.watcher.poll(), [])
+        path.write_text("print(2)\n", encoding="utf-8")
+        self.assertEqual(self.watcher.poll(), [])
+        self.clock.advance(DEFAULT_DEBOUNCE_SECONDS)
+        self.assertEqual(self.watcher.poll(), [FileChange(ChangeKind.MODIFIED, path)])
+
     def test_ignores_non_python_and_nested_files(self):
         self._write("readme.txt", "nope\n")
         self._write(".secret.py", "hidden = True\n")
