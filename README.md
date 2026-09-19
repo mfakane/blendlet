@@ -85,5 +85,5 @@ uv run python -m unittest discover -s tests -v
 ```
 
 If Blender is on `PATH` (or `BLENDER` points at `blender.exe`), the suite also
-validates the extension package and runs an enable/disable cycle in a
-background Blender process.
+validates the extension package and runs host lifecycle and status-panel checks
+in a background Blender process (`blender --background --factory-startup`).
