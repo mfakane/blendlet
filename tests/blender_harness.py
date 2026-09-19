@@ -52,10 +52,13 @@ def _status_entry(status_path: Path, name: str) -> dict:
 
 
 def main() -> None:
+    import bpy
+
     import blendlet
     from blendlet.host import get_host, reset_host
     from blendlet.paths import resolve_blendlets_directory
     from blendlet.preferences import BlendletPreferences
+    from blendlet.ui import BLENDLET_OT_reload, BLENDLET_PT_status
 
     reset_host()
 
@@ -67,6 +70,12 @@ def main() -> None:
         f"host directory {host.blendlets_directory!s} should be the default",
     )
     _assert(BlendletPreferences.is_registered, "preferences class should be registered")
+    _assert(BLENDLET_PT_status.is_registered, "status panel should be registered")
+    _assert(BLENDLET_OT_reload.is_registered, "reload operator should be registered")
+    _assert(
+        getattr(bpy.types, "BLENDLET_PT_status", None) is BLENDLET_PT_status,
+        "status panel should be installed on bpy.types",
+    )
 
     blendlet.unregister()
     _assert(not host.running, "host should stop on unregister()")
@@ -78,6 +87,8 @@ def main() -> None:
         not BlendletPreferences.is_registered,
         "preferences class should be unregistered on disable",
     )
+    _assert(not BLENDLET_PT_status.is_registered, "status panel should unregister on disable")
+    _assert(not BLENDLET_OT_reload.is_registered, "reload operator should unregister on disable")
 
     blendlet.register()
     _assert(host.running, "host should start again without restarting Blender")
@@ -85,6 +96,7 @@ def main() -> None:
         BlendletPreferences.is_registered,
         "preferences class should register again without restarting Blender",
     )
+    _assert(BLENDLET_PT_status.is_registered, "status panel should register again without restarting Blender")
     custom = Path(tempfile.mkdtemp()).resolve()
     host.set_blendlets_directory(custom)
     _assert(
@@ -123,8 +135,6 @@ def main() -> None:
     _assert(host.discovered_files() == (), f"deleted file still discovered: {host.discovered_files()}")
     _assert_no_further_events(host, events, "delete")
 
-    import bpy
-
     events.clear()
     persistent = custom / "marker.py"
     persistent.write_text(
@@ -153,6 +163,27 @@ def main() -> None:
     _assert(marker_status["active"] is True, f"loaded tool should be active: {marker_status}")
     _assert(marker_status["last_good"] is False, f"successful load is not last-good: {marker_status}")
     _assert(marker_status["error"] is None, f"successful load should have no error: {marker_status}")
+
+    disable_result = bpy.ops.blendlet.set_enabled(path=str(persistent), enabled=False)
+    _assert("FINISHED" in disable_result, f"disable operator failed: {disable_result}")
+    _assert(
+        "BLENDLET_MARKER" not in bpy.app.driver_namespace,
+        "Disable should unload the persistent tool",
+    )
+    _assert(
+        _status_entry(status_path, "marker")["state"] == "disabled",
+        f"disable should write disabled status, got {_status_entry(status_path, 'marker')}",
+    )
+    reload_result = bpy.ops.blendlet.reload(path=str(persistent))
+    _assert("FINISHED" in reload_result, f"reload operator failed: {reload_result}")
+    _assert(
+        bpy.app.driver_namespace.get("BLENDLET_MARKER") == "marker",
+        "Reload should load the blendlet again",
+    )
+    _assert(
+        _status_entry(status_path, "marker")["state"] == "loaded",
+        f"reload should write loaded status, got {_status_entry(status_path, 'marker')}",
+    )
 
     events.clear()
     once = custom / "once.py"
@@ -268,6 +299,17 @@ def main() -> None:
     _assert(
         owned_status["error"] is not None and owned_status["error"]["type"] == "SyntaxError",
         f"status should expose SyntaxError, got {owned_status}",
+    )
+    snapshot = host.status_snapshot()
+    owned_row = [item for item in snapshot["blendlets"] if item["name"] == "owned"]
+    _assert(len(owned_row) == 1, f"status snapshot should list owned, got {snapshot}")
+    _assert(
+        owned_row[0]["state"] == "error" and owned_row[0]["last_good"] is True,
+        f"sidebar snapshot should show last-good failure, got {owned_row[0]}",
+    )
+    _assert(
+        owned_row[0]["error"] is not None and "SyntaxError" in owned_row[0]["error"]["traceback"],
+        f"sidebar snapshot should include traceback, got {owned_row[0]}",
     )
     owned_error = custom / ".blendlet" / "errors" / "owned.txt"
     _assert(owned_error.is_file(), "syntax-failed reload should write an error sidecar")

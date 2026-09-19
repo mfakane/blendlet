@@ -14,8 +14,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .discovery import PendingFile
+from .discovery import PendingFile, fingerprint_file
 from .lifecycle import Blendlet
+
+STATE_LABELS = {
+    "loaded": "Loaded",
+    "ran": "Ran",
+    "error": "Failed",
+    "reloading": "Reloading",
+    "disabled": "Disabled",
+}
+
+ERROR_PREVIEW_LINES = 16
 
 SCHEMA_VERSION = 1
 STATUS_DIRNAME = ".blendlet"
@@ -62,16 +72,54 @@ def atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+def display_state(entry: dict[str, Any]) -> str:
+    """Human label for a status entry, including last-good failures."""
+    state = entry.get("state")
+    if state == "error" and entry.get("last_good"):
+        return "Failed — last good active"
+    if isinstance(state, str):
+        return STATE_LABELS.get(state, state)
+    return "Unknown"
+
+
+def latest_edit_loaded(entry: dict[str, Any]) -> bool:
+    """True when the latest on-disk contents loaded or ran successfully."""
+    return entry.get("state") in {"loaded", "ran"}
+
+
+def error_preview_lines(
+    entry: dict[str, Any],
+    *,
+    max_lines: int = ERROR_PREVIEW_LINES,
+) -> list[str]:
+    """Traceback lines a panel can show without a terminal."""
+    error = entry.get("error")
+    if not error:
+        return []
+    traceback_text = (error.get("traceback") or "").rstrip()
+    if traceback_text:
+        lines = traceback_text.splitlines()
+        if len(lines) > max_lines:
+            return ["…"] + lines[-max_lines:]
+        return lines
+    type_name = error.get("type") or "Error"
+    message = error.get("message") or ""
+    if message:
+        return [f"{type_name}: {message}"]
+    return [type_name]
+
+
 def build_status(
     *,
     blendlets_directory: Path,
     running: bool,
     records: tuple[Blendlet, ...] = (),
     pending: tuple[PendingFile, ...] = (),
+    disabled: tuple[Path, ...] = (),
     now: datetime,
 ) -> dict[str, Any]:
     directory = Path(blendlets_directory)
-    entries = [] if not running else _blendlet_entries(records, pending)
+    entries = [] if not running else _blendlet_entries(records, pending, disabled)
     return {
         "schema_version": SCHEMA_VERSION,
         "updated_at": format_timestamp(now),
@@ -89,6 +137,7 @@ def write_status(
     running: bool,
     records: tuple[Blendlet, ...] = (),
     pending: tuple[PendingFile, ...] = (),
+    disabled: tuple[Path, ...] = (),
     now: datetime | None = None,
     previous_signature: str | None = None,
 ) -> tuple[Path, str, bool]:
@@ -103,6 +152,7 @@ def write_status(
         running=running,
         records=records,
         pending=pending,
+        disabled=disabled,
         now=moment,
     )
     signature = _signature(payload)
@@ -124,11 +174,15 @@ def _signature(payload: dict[str, Any]) -> str:
 def _blendlet_entries(
     records: tuple[Blendlet, ...],
     pending: tuple[PendingFile, ...],
+    disabled: tuple[Path, ...] = (),
 ) -> list[dict[str, Any]]:
+    disabled_set = {Path(path) for path in disabled}
     pending_by_path = {item.path: item.fingerprint for item in pending}
     entries: list[dict[str, Any]] = []
     seen: set[Path] = set()
     for record in records:
+        if record.path in disabled_set:
+            continue
         reloading = record.path in pending_by_path
         entries.append(
             _entry_from_record(
@@ -139,9 +193,14 @@ def _blendlet_entries(
         )
         seen.add(record.path)
     for item in pending:
-        if item.path in seen:
+        if item.path in seen or item.path in disabled_set:
             continue
         entries.append(_entry_from_pending(item))
+        seen.add(item.path)
+    for path in sorted(disabled_set, key=lambda item: item.as_posix()):
+        if path in seen:
+            continue
+        entries.append(_entry_from_disabled(path))
     entries.sort(key=lambda entry: entry["path"])
     return entries
 
@@ -185,6 +244,22 @@ def _entry_from_record(
         "active": active,
         "last_good": last_good,
         "error": error,
+    }
+
+
+def _entry_from_disabled(path: Path) -> dict[str, Any]:
+    return {
+        "name": path.stem,
+        "path": str(path),
+        "state": "disabled",
+        "kind": None,
+        "file_hash": fingerprint_file(path),
+        "active_hash": None,
+        "generation": 0,
+        "updated_at": None,
+        "active": False,
+        "last_good": False,
+        "error": None,
     }
 
 

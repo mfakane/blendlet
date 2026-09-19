@@ -6,9 +6,10 @@ from . import host, paths
 
 
 def register() -> None:
-    from . import preferences
+    from . import preferences, ui
 
     preferences.register()
+    ui.register()
     directory = paths.resolve_blendlets_directory(
         preferences.configured_blendlets_directory()
     )
@@ -16,9 +17,10 @@ def register() -> None:
 
 
 def unregister() -> None:
-    from . import preferences
+    from . import preferences, ui
 
     try:
         host.get_host().stop()
     finally:
+        ui.unregister()
         preferences.unregister()

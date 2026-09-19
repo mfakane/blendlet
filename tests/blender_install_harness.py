@@ -29,6 +29,7 @@ def main() -> None:
     from bl_ext.user_default.blendlet.host import get_host
     from bl_ext.user_default.blendlet.paths import resolve_blendlets_directory
     from bl_ext.user_default.blendlet.preferences import BlendletPreferences
+    from bl_ext.user_default.blendlet.ui import BLENDLET_OT_reload, BLENDLET_PT_status
 
     package = blendlet.__package__
     _assert(package == "bl_ext.user_default.blendlet", f"unexpected package {package}")
@@ -57,6 +58,8 @@ def main() -> None:
     _assert(not host.is_timer_registered(), "disable should unregister the discovery timer")
     _assert(host.blendlets_directory is None, "disable should clear the host directory")
     _assert(not BlendletPreferences.is_registered, "disable should unregister preferences")
+    _assert(not BLENDLET_PT_status.is_registered, "disable should unregister the status panel")
+    _assert(not BLENDLET_OT_reload.is_registered, "disable should unregister host operators")
 
     addon_utils.enable(package)
     host = get_host()
@@ -68,6 +71,8 @@ def main() -> None:
         f"re-enable should keep the configured directory, got {host.blendlets_directory}",
     )
     _assert(BlendletPreferences.is_registered, "enable should register preferences")
+    _assert(BLENDLET_PT_status.is_registered, "enable should register the status panel")
+    _assert(BLENDLET_OT_reload.is_registered, "enable should register host operators")
 
     print("BLENDLET_INSTALL_OK", flush=True)
 

@@ -76,6 +76,15 @@ class HostLifecycleTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.host.set_blendlets_directory(self.directory)
 
+    def test_manual_controls_require_a_running_host(self):
+        path = self.directory / "tool.py"
+        with self.assertRaises(RuntimeError):
+            self.host.reload_now(path)
+        with self.assertRaises(RuntimeError):
+            self.host.disable(path)
+        with self.assertRaises(RuntimeError):
+            self.host.enable(path)
+
     def test_get_host_returns_process_singleton(self):
         reset_host()
         first = get_host()
@@ -314,6 +323,100 @@ class HostModuleLifecycleTests(unittest.TestCase):
         self._stable_poll()
         record = self.host.loaded_blendlet(path)
         self.assertIsNone(record.context.radius)
+
+    def test_disable_unloads_and_ignores_edits_until_enable(self):
+        path = self.directory / "tool.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        self._stable_poll()
+        self.host.disable(path)
+        self.assertTrue(self.host.is_disabled(path))
+        self.assertEqual(self.host.disabled_files(), (path,))
+        self.assertIsNone(self.host.loaded_blendlet(path))
+        self.assertEqual(self.host.persistent_files(), ())
+        self.assertEqual(_log_lines(path), ["register:tool", "unregister:tool"])
+
+        path.write_text(PERSISTENT + "\nMARKER = 1\n", encoding="utf-8")
+        self._stable_poll()
+        self.assertIsNone(self.host.loaded_blendlet(path))
+        self.assertEqual(_log_lines(path), ["register:tool", "unregister:tool"])
+
+        record = self.host.enable(path)
+        self.assertFalse(self.host.is_disabled(path))
+        self.assertIsNotNone(record)
+        self.assertTrue(record.persistent)
+        self.assertEqual(record.module.MARKER, 1)
+        self.assertEqual(
+            _log_lines(path),
+            ["register:tool", "unregister:tool", "register:tool"],
+        )
+
+    def test_reload_now_loads_without_waiting_for_debounce(self):
+        path = self.directory / "tool.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        record = self.host.reload_now(path)
+        self.assertIsNotNone(record)
+        self.assertTrue(record.persistent)
+        self.assertEqual(_log_lines(path), ["register:tool"])
+        self.assertEqual(self.host.poll(), [])
+        self.clock.advance(DEFAULT_DEBOUNCE_SECONDS)
+        self.assertEqual(self.host.poll(), [])
+        self.assertEqual(_log_lines(path), ["register:tool"])
+
+        path.write_text(PERSISTENT + "\nMARKER = 7\n", encoding="utf-8")
+        reloaded = self.host.reload_now(path)
+        self.assertEqual(reloaded.module.MARKER, 7)
+        self.assertEqual(
+            _log_lines(path),
+            ["register:tool", "unregister:tool", "register:tool"],
+        )
+        self.clock.advance(DEFAULT_DEBOUNCE_SECONDS)
+        self.assertEqual(self.host.poll(), [])
+        self.assertEqual(
+            _log_lines(path),
+            ["register:tool", "unregister:tool", "register:tool"],
+        )
+
+    def test_reload_all_re_enables_and_loads_current_files(self):
+        kept = self.directory / "kept.py"
+        skipped = self.directory / "skipped.py"
+        kept.write_text(PERSISTENT, encoding="utf-8")
+        skipped.write_text(PERSISTENT, encoding="utf-8")
+        self._stable_poll()
+        self.host.disable(skipped)
+        kept.write_text(PERSISTENT + "\nMARKER = 3\n", encoding="utf-8")
+        skipped.write_text(PERSISTENT + "\nMARKER = 4\n", encoding="utf-8")
+        self.host.reload_all()
+        self.assertFalse(self.host.is_disabled(skipped))
+        self.assertEqual(self.host.loaded_blendlet(kept).module.MARKER, 3)
+        self.assertEqual(self.host.loaded_blendlet(skipped).module.MARKER, 4)
+
+    def test_reload_now_re_enables_a_disabled_blendlet(self):
+        path = self.directory / "tool.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        self._stable_poll()
+        self.host.disable(path)
+        record = self.host.reload_now(path)
+        self.assertFalse(self.host.is_disabled(path))
+        self.assertTrue(record.persistent)
+        self.assertEqual(
+            _log_lines(path),
+            ["register:tool", "unregister:tool", "register:tool"],
+        )
+
+    def test_disable_keeps_ctx_state_for_enable(self):
+        path = self.directory / "brush.py"
+        path.write_text(
+            "def register(ctx):\n    ctx.state['radius'] = 12.0\n",
+            encoding="utf-8",
+        )
+        self._stable_poll()
+        self.host.disable(path)
+        path.write_text(
+            "def register(ctx):\n    ctx.radius = ctx.state.get('radius')\n",
+            encoding="utf-8",
+        )
+        record = self.host.enable(path)
+        self.assertEqual(record.context.radius, 12.0)
 
     def test_stop_disposes_owned_resources_without_unregister(self):
         path = self.directory / "owned.py"

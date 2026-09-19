@@ -20,7 +20,10 @@ from blendlet.status import (
     SCHEMA_VERSION,
     atomic_write_text,
     build_status,
+    display_state,
     error_file,
+    error_preview_lines,
+    latest_edit_loaded,
     status_file,
     write_status,
 )
@@ -176,6 +179,32 @@ class StatusSnapshotTests(unittest.TestCase):
         self.assertFalse(entry["active"])
         self.assertFalse(entry["last_good"])
 
+    def test_disabled_path_is_listed_instead_of_loaded_or_pending(self):
+        path = self.directory / "brush.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        record = self._record(
+            "brush.py",
+            persistent=True,
+            module=types.ModuleType("keep"),
+            attempted_hash="aaa",
+            source_hash="aaa",
+        )
+        payload = build_status(
+            blendlets_directory=self.directory,
+            running=True,
+            records=(record,),
+            pending=(PendingFile(path=path, fingerprint="bbb"),),
+            disabled=(path,),
+            now=self.now,
+        )
+        entry = _entry(payload, "brush")
+        self.assertEqual(entry["state"], "disabled")
+        self.assertFalse(entry["active"])
+        self.assertFalse(entry["last_good"])
+        self.assertIsNone(entry["error"])
+        self.assertEqual(entry["file_hash"], fingerprint_file(path))
+        self.assertEqual(payload["blendlets"], [entry])
+
 
 class AgentReadableStatusTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -299,6 +328,22 @@ class AgentReadableStatusTests(unittest.TestCase):
         self.assertIsNone(payload["host"]["blendlets_directory"])
         self.assertEqual(payload["blendlets"], [])
 
+    def test_disable_writes_disabled_status_and_skips_later_edits(self):
+        path = self.directory / "brush.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        self._stable_poll()
+        self.host.disable(path)
+        entry = _entry(_read_status(self.directory), "brush")
+        self.assertEqual(entry["state"], "disabled")
+        self.assertFalse(entry["active"])
+        self.assertIsNone(self.host.loaded_blendlet(path))
+        path.write_text(SYNTAX_ERROR, encoding="utf-8")
+        self._stable_poll()
+        later = _entry(_read_status(self.directory), "brush")
+        self.assertEqual(later["state"], "disabled")
+        self.assertIsNone(later["error"])
+        self.assertIsNone(self.host.loaded_blendlet(path))
+
     def test_identical_status_is_not_rewritten(self):
         path = status_file(self.directory)
         first_mtime = path.stat().st_mtime_ns
@@ -333,6 +378,39 @@ class StatusWriteSkipTests(unittest.TestCase):
                 json.loads(path.read_text(encoding="utf-8"))["updated_at"],
                 "2026-09-19T06:00:00Z",
             )
+
+
+class StatusDisplayTests(unittest.TestCase):
+    def test_glance_labels_distinguish_loaded_failed_and_last_good(self):
+        loaded = {"state": "loaded", "last_good": False}
+        ran = {"state": "ran", "last_good": False}
+        failed = {"state": "error", "last_good": False}
+        last_good = {"state": "error", "last_good": True}
+        disabled = {"state": "disabled", "last_good": False}
+        self.assertEqual(display_state(loaded), "Loaded")
+        self.assertEqual(display_state(ran), "Ran")
+        self.assertEqual(display_state(failed), "Failed")
+        self.assertEqual(display_state(last_good), "Failed — last good active")
+        self.assertEqual(display_state(disabled), "Disabled")
+        self.assertTrue(latest_edit_loaded(loaded))
+        self.assertTrue(latest_edit_loaded(ran))
+        self.assertFalse(latest_edit_loaded(failed))
+        self.assertFalse(latest_edit_loaded(last_good))
+        self.assertFalse(latest_edit_loaded(disabled))
+        self.assertFalse(latest_edit_loaded({"state": "reloading"}))
+
+    def test_error_preview_shows_the_end_of_a_traceback(self):
+        traceback_text = "\n".join(f"line {i}" for i in range(20))
+        lines = error_preview_lines(
+            {"error": {"type": "SyntaxError", "message": "bad", "traceback": traceback_text}},
+            max_lines=4,
+        )
+        self.assertEqual(lines, ["…", "line 16", "line 17", "line 18", "line 19"])
+        self.assertEqual(
+            error_preview_lines({"error": {"type": "RuntimeError", "message": "boom"}}),
+            ["RuntimeError: boom"],
+        )
+        self.assertEqual(error_preview_lines({"error": None}), [])
 
 
 class LifecycleHashTests(unittest.TestCase):
