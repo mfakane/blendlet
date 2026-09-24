@@ -16,11 +16,12 @@ INSTALL_HARNESS = REPO_ROOT / "tests" / "blender_install_harness.py"
 
 
 def find_blender() -> Path | None:
-    env = os.environ.get("BLENDER")
-    if env:
-        candidate = Path(env)
-        if candidate.exists():
-            return candidate
+    for variable in ("BLENDER_EXECUTABLE", "BLENDER"):
+        env = os.environ.get(variable)
+        if env:
+            candidate = Path(env)
+            if candidate.exists():
+                return candidate
     which = shutil.which("blender")
     if which:
         return Path(which)

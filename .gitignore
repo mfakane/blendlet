@@ -11,3 +11,5 @@ dist/
 *.blend2
 .DS_Store
 Thumbs.db
+.opencode/
+.env
