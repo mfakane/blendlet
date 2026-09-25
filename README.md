@@ -34,6 +34,9 @@ define ``register(ctx)`` and may define ``unregister(ctx)``. One-shot scripts
 define ``run(ctx)`` instead; they execute on create/modify and are not kept as
 loaded add-ons. Ordinary ``bpy`` remains available.
 
+For the development workflow, examples, status contract, and troubleshooting,
+see [`skills/blendlet-development/SKILL.md`](skills/blendlet-development/SKILL.md).
+
 Register Blender resources through ``ctx`` so reload, delete, and add-on
 disable undo them automatically. A simple blendlet does not need
 ``unregister()`` merely to tear down those resources. ``ctx.dispose()`` is
