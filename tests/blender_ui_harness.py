@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,22 @@ def unregister(ctx):
 BROKEN_REGISTER = """\
 def register(ctx):
     raise RuntimeError("panel-boom")
+"""
+
+# Loading a .blend resets bpy.app.driver_namespace, so project checks log to a file.
+LOGGING = """\
+from pathlib import Path
+LOG = Path(__file__).with_suffix(".log")
+
+def _append(line):
+    previous = LOG.read_text(encoding="utf-8") if LOG.exists() else ""
+    LOG.write_text(previous + line + "\\n", encoding="utf-8")
+
+def register(ctx):
+    _append("register")
+
+def unregister(ctx):
+    _append("unregister")
 """
 
 
@@ -69,6 +86,9 @@ class RecordingLayout:
     def box(self) -> RecordingLayout:
         return RecordingLayout(self._log)
 
+    def separator(self) -> None:
+        pass
+
     def label(self, text: str = "", icon: str = "NONE") -> None:
         self._log["labels"].append(text)
 
@@ -86,6 +106,9 @@ def _draw_panel(panel_cls) -> dict:
 
         draw = panel_cls.draw
         _draw_blendlet = panel_cls._draw_blendlet
+        _draw_project = panel_cls._draw_project
+        _draw_project_header = panel_cls._draw_project_header
+        _draw_untrusted = panel_cls._draw_untrusted
 
         def __init__(self) -> None:
             self.layout = RecordingLayout(log)
@@ -127,7 +150,7 @@ def main() -> None:
 
     directory = Path(tempfile.mkdtemp()).resolve()
     host.set_blendlets_directory(directory)
-    status_path = directory / ".blendlet" / "status.json"
+    status_path = directory / ".blendlet-status" / "status.json"
 
     empty = _draw_panel(BLENDLET_PT_status)
     _assert(str(directory) in empty["labels"], f"empty panel should show the directory, got {empty['labels']}")
@@ -244,7 +267,122 @@ def main() -> None:
     _assert(not BLENDLET_OT_reload.is_registered, "disable should unregister operators")
     _assert("BLENDLET_UI_MARKER" not in bpy.app.driver_namespace, "disable should unload last-good")
 
+    _check_project_trust()
+
     print("BLENDLET_UI_OK", flush=True)
+
+
+def _log_lines(path: Path) -> list[str]:
+    log = path.with_suffix(".log")
+    if not log.exists():
+        return []
+    return [line for line in log.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _wait_until(host, predicate, message: str, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        host.poll()
+        if predicate():
+            return
+        time.sleep(0.05)
+    _fail(f"{message}: timed out")
+
+
+def _check_project_trust() -> None:
+    """A .blendlet folder beside the .blend file loads only after Trust."""
+    import bpy
+
+    import blendlet
+    from blendlet.host import get_host
+    from blendlet.ui import BLENDLET_PT_status
+
+    blendlet.register()
+    host = get_host()
+    host.set_blendlets_directory(Path(tempfile.mkdtemp()).resolve())
+
+    root = Path(tempfile.mkdtemp()).resolve()
+    project_dir = root / ".blendlet"
+    project_dir.mkdir()
+    scene = root / "scene.blend"
+
+    bpy.ops.wm.save_as_mainfile(filepath=str(scene))
+    empty = _draw_panel(BLENDLET_PT_status)
+    _assert(
+        not _ops_of(empty, "blendlet.trust_project"),
+        f"an untrusted folder without blendlets should not prompt, got {empty['operators']}",
+    )
+
+    tool = project_dir / "project_tool.py"
+    tool.write_text(LOGGING, encoding="utf-8")
+    time.sleep(0.5)
+    host.poll()
+    time.sleep(0.5)
+    host.poll()
+    _assert(host.project_directory is None, f"untrusted folder should not be watched: {host.project_directory}")
+    _assert(_log_lines(tool) == [], f"untrusted blendlet must not run, got {_log_lines(tool)}")
+    _assert(
+        not (project_dir / ".blendlet-status").exists(),
+        "host should not write status into an untrusted folder",
+    )
+
+    untrusted = _draw_panel(BLENDLET_PT_status)
+    _assert(str(project_dir) in untrusted["labels"], f"panel should show the folder, got {untrusted['labels']}")
+    _assert("project_tool.py" in untrusted["labels"], f"panel should list untrusted files, got {untrusted['labels']}")
+    trust_buttons = {item["text"]: item for item in _ops_of(untrusted, "blendlet.trust_project")}
+    _assert(
+        set(trust_buttons) == {"Trust for Now", "Trust and Remember"},
+        f"untrusted folder should offer both trust buttons, got {untrusted['operators']}",
+    )
+    _assert(trust_buttons["Trust for Now"]["props"].remember is False, "Trust for Now should not remember")
+    _assert(trust_buttons["Trust and Remember"]["props"].remember is True, "Trust and Remember should remember")
+
+    try:
+        remember_result = bpy.ops.blendlet.trust_project(remember=True)
+    except RuntimeError:
+        remember_result = {"CANCELLED"}
+    _assert(
+        "CANCELLED" in remember_result,
+        f"remembering without add-on preferences should fail, got {remember_result}",
+    )
+    _assert(host.project_directory is None, "failed remember must not trust the folder")
+
+    trust_result = bpy.ops.blendlet.trust_project(remember=False)
+    _assert("FINISHED" in trust_result, f"Trust for Now failed: {trust_result}")
+    _assert(host.project_directory == project_dir, f"trusted folder should be watched: {host.project_directory}")
+    _wait_until(host, lambda: _log_lines(tool) == ["register"], "trusted blendlet should load")
+    project_status = project_dir / ".blendlet-status" / "status.json"
+    _assert(_status_entry(project_status, "project_tool")["state"] == "loaded", "project status should report loaded")
+
+    trusted = _draw_panel(BLENDLET_PT_status)
+    _assert(not _ops_of(trusted, "blendlet.trust_project"), f"trusted folder should not prompt, got {trusted['operators']}")
+    _assert("project_tool" in trusted["labels"], f"panel should list the project blendlet, got {trusted['labels']}")
+    _assert("Loaded" in trusted["labels"], f"panel should show Loaded, got {trusted['labels']}")
+
+    elsewhere = Path(tempfile.mkdtemp()).resolve() / "elsewhere.blend"
+    bpy.ops.wm.save_as_mainfile(filepath=str(elsewhere))
+    _assert(host.project_directory is None, "saving elsewhere should stop watching the old folder")
+    _assert(_log_lines(tool) == ["register", "unregister"], f"leaving the folder should unload, got {_log_lines(tool)}")
+
+    bpy.ops.wm.open_mainfile(filepath=str(scene))
+    _assert(host.project_directory == project_dir, "reopening should keep session trust")
+    _wait_until(
+        host,
+        lambda: _log_lines(tool) == ["register", "unregister", "register"],
+        "reopened trusted blendlet should load",
+    )
+
+    blendlet.unregister()
+    _assert(
+        _log_lines(tool) == ["register", "unregister", "register", "unregister"],
+        f"add-on disable should unload project blendlets, got {_log_lines(tool)}",
+    )
+
+    blendlet.register()
+    host = get_host()
+    host.set_blendlets_directory(Path(tempfile.mkdtemp()).resolve())
+    _assert(host.project_directory is None, "session trust should not survive an add-on restart")
+    blendlet.unregister()
 
 
 if __name__ == "__main__":

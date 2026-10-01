@@ -1,10 +1,22 @@
-"""Resolve the configured blendlets directory without importing bpy."""
+"""Resolve blendlets directories without importing bpy."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 _DEFAULT_DIRNAME = "blendlets"
+PROJECT_DIRNAME = ".blendlet"
+
+
+def project_blendlets_directory(blend_filepath: str) -> Path | None:
+    """Return the ``.blendlet`` folder beside a saved .blend file.
+
+    An unsaved file (empty path) has no project folder. The folder does not
+    need to exist.
+    """
+    if not blend_filepath:
+        return None
+    return (Path(blend_filepath).parent / PROJECT_DIRNAME).resolve()
 
 
 def default_blendlets_directory(*, home: Path | None = None) -> Path:

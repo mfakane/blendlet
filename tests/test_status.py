@@ -159,7 +159,7 @@ class StatusSnapshotTests(unittest.TestCase):
         self.assertEqual(kept["file_hash"], "bbb")
         self.assertEqual(kept["active_hash"], "aaa")
         self.assertEqual(kept["error"]["type"], "SyntaxError")
-        self.assertEqual(kept["error"]["file"], ".blendlet/errors/brush.txt")
+        self.assertEqual(kept["error"]["file"], ".blendlet-status/errors/brush.txt")
         self.assertEqual(failed["state"], "error")
         self.assertFalse(failed["active"])
         self.assertFalse(failed["last_good"])
@@ -378,6 +378,20 @@ class StatusWriteSkipTests(unittest.TestCase):
                 json.loads(path.read_text(encoding="utf-8"))["updated_at"],
                 "2026-09-19T06:00:00Z",
             )
+
+
+class StatusGitignoreTests(unittest.TestCase):
+    def test_status_folder_ignores_itself_without_overwriting_edits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp).resolve()
+            path, _signature, _written = write_status(directory, running=True)
+            self.assertEqual(path, directory / ".blendlet-status" / "status.json")
+            gitignore = directory / ".blendlet-status" / ".gitignore"
+            self.assertIn("*", gitignore.read_text(encoding="utf-8").splitlines())
+
+            gitignore.write_text("*\n!keep.txt\n", encoding="utf-8")
+            write_status(directory, running=False)
+            self.assertEqual(gitignore.read_text(encoding="utf-8"), "*\n!keep.txt\n")
 
 
 class StatusDisplayTests(unittest.TestCase):

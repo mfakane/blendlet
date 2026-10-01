@@ -17,7 +17,7 @@ copyright = [
 ]
 
 [permissions]
-files = "Read blendlet Python files from a configured directory"
+files = "Read blendlets from configured and trusted project folders"
 
 [build]
 paths_exclude_pattern = [

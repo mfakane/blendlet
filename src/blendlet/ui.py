@@ -8,6 +8,8 @@ import bpy
 from bpy.props import BoolProperty, StringProperty
 from bpy.types import Operator, Panel
 
+from . import project
+from .discovery import iter_blendlet_files
 from .host import get_host
 from .status import display_state, error_preview_lines, latest_edit_loaded
 
@@ -26,10 +28,13 @@ def _state_icon(entry: dict) -> str:
 
 
 def _entry_for(path: str) -> dict | None:
-    snapshot = get_host().status_snapshot()
-    for entry in snapshot["blendlets"]:
-        if entry["path"] == path:
-            return entry
+    host = get_host()
+    for snapshot in (host.status_snapshot(), host.project_status_snapshot()):
+        if snapshot is None:
+            continue
+        for entry in snapshot["blendlets"]:
+            if entry["path"] == path:
+                return entry
     return None
 
 
@@ -143,6 +148,49 @@ class BLENDLET_OT_copy_error(Operator):
         return {"FINISHED"}
 
 
+class BLENDLET_OT_trust_project(Operator):
+    bl_idname = "blendlet.trust_project"
+    bl_label = "Trust Project Blendlets"
+    bl_options = {"REGISTER", "INTERNAL"}
+
+    remember: BoolProperty(name="Remember", default=False)
+
+    @classmethod
+    def description(cls, _context, properties) -> str:
+        if properties.remember:
+            return (
+                "Run blendlets from the .blendlet folder beside this .blend file, "
+                "now and in later sessions"
+            )
+        return "Run blendlets from the .blendlet folder beside this .blend file for this session"
+
+    @classmethod
+    def poll(cls, _context) -> bool:
+        return get_host().running and project.current_directory() is not None
+
+    def execute(self, _context):
+        directory = project.current_directory()
+        if directory is None:
+            return {"CANCELLED"}
+        if not project.trust(directory, remember=self.remember):
+            self.report({"ERROR"}, "Add-on preferences are unavailable; trust was not remembered")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class BLENDLET_OT_forget_trusted_directory(Operator):
+    bl_idname = "blendlet.forget_trusted_directory"
+    bl_label = "Forget Trusted Folder"
+    bl_description = "Stop trusting this folder. Its blendlets unload if they are running"
+    bl_options = {"REGISTER", "INTERNAL"}
+
+    path: StringProperty(name="Path", options={"HIDDEN"})
+
+    def execute(self, _context):
+        project.forget(Path(self.path))
+        return {"FINISHED"}
+
+
 class BLENDLET_PT_status(Panel):
     bl_label = "Blendlet"
     bl_idname = "BLENDLET_PT_status"
@@ -173,10 +221,43 @@ class BLENDLET_PT_status(Panel):
 
         if not blendlets:
             layout.label(text="No blendlets in this directory")
-            return
-
         for entry in blendlets:
             self._draw_blendlet(layout, entry)
+
+        self._draw_project(layout, host)
+
+    def _draw_project(self, layout, host) -> None:
+        directory = project.current_directory()
+        if directory is None or directory == host.blendlets_directory:
+            return
+        snapshot = host.project_status_snapshot()
+        if snapshot is None or host.project_directory != directory:
+            untrusted = sorted(iter_blendlet_files(directory), key=lambda item: item.name)
+            if untrusted:
+                self._draw_project_header(layout, directory)
+                self._draw_untrusted(layout, untrusted)
+            return
+        self._draw_project_header(layout, directory)
+        if not snapshot["blendlets"]:
+            layout.label(text="No blendlets in this folder")
+        for entry in snapshot["blendlets"]:
+            self._draw_blendlet(layout, entry)
+
+    def _draw_project_header(self, layout, directory) -> None:
+        layout.separator()
+        layout.label(text="Blend File Blendlets")
+        layout.label(text=str(directory), icon="FILE_FOLDER")
+
+    def _draw_untrusted(self, layout, files) -> None:
+        box = layout.box()
+        warning = box.row()
+        warning.alert = True
+        warning.label(text="Not trusted: blendlets run Python with full access", icon="ERROR")
+        for path in files:
+            box.label(text=path.name, icon="FILE_SCRIPT")
+        buttons = box.row(align=True)
+        buttons.operator("blendlet.trust_project", text="Trust for Now").remember = False
+        buttons.operator("blendlet.trust_project", text="Trust and Remember").remember = True
 
     def _draw_blendlet(self, layout, entry: dict) -> None:
         box = layout.box()
@@ -217,6 +298,8 @@ CLASSES = (
     BLENDLET_OT_set_enabled,
     BLENDLET_OT_open_directory,
     BLENDLET_OT_copy_error,
+    BLENDLET_OT_trust_project,
+    BLENDLET_OT_forget_trusted_directory,
     BLENDLET_PT_status,
 )
 

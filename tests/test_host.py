@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -432,4 +433,185 @@ class HostModuleLifecycleTests(unittest.TestCase):
         self.host.stop()
         self.assertEqual(path.with_suffix(".log").read_text(encoding="utf-8"), "disposed")
         self.assertEqual(self.host.persistent_files(), ())
+
+
+class HostProjectDirectoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.host = Host()
+        self.user = Path(tempfile.mkdtemp()).resolve()
+        self.project = Path(tempfile.mkdtemp()).resolve() / ".blendlet"
+        self.project.mkdir()
+        self.host.start(
+            self.user,
+            clock=self.clock,
+            debounce_seconds=DEFAULT_DEBOUNCE_SECONDS,
+        )
+
+    def tearDown(self) -> None:
+        if self.host.running:
+            self.host.stop()
+        reset_host()
+
+    def _stable_poll(self) -> list[FileChange]:
+        first = self.host.poll()
+        self.clock.advance(DEFAULT_DEBOUNCE_SECONDS)
+        return first + self.host.poll()
+
+    def _status(self, directory: Path) -> dict:
+        return json.loads((directory / ".blendlet-status" / "status.json").read_text(encoding="utf-8"))
+
+    def test_project_files_are_ignored_until_the_directory_is_set(self):
+        path = self.project / "tool.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        self._stable_poll()
+        self.assertIsNone(self.host.loaded_blendlet(path))
+        self.assertEqual(_log_lines(path), [])
+        self.assertIsNone(self.host.project_directory)
+        self.assertIsNone(self.host.project_status_snapshot())
+        self.assertFalse((self.project / ".blendlet-status").exists())
+
+    def test_set_project_directory_loads_alongside_user_blendlets(self):
+        user_tool = self.user / "user_tool.py"
+        user_tool.write_text(PERSISTENT, encoding="utf-8")
+        project_tool = self.project / "project_tool.py"
+        project_tool.write_text(PERSISTENT, encoding="utf-8")
+        self.host.set_project_directory(self.project)
+        self._stable_poll()
+
+        self.assertEqual(self.host.project_directory, self.project)
+        self.assertEqual(set(self.host.discovered_files()), {user_tool, project_tool})
+        self.assertEqual(_log_lines(project_tool), ["register:project_tool"])
+        self.assertEqual(_log_lines(user_tool), ["register:user_tool"])
+
+        user_status = self._status(self.user)
+        project_status = self._status(self.project)
+        self.assertEqual([entry["name"] for entry in user_status["blendlets"]], ["user_tool"])
+        self.assertEqual([entry["name"] for entry in project_status["blendlets"]], ["project_tool"])
+        self.assertEqual(project_status["host"]["blendlets_directory"], str(self.project))
+        self.assertEqual(project_status["blendlets"][0]["state"], "loaded")
+        snapshot = self.host.project_status_snapshot()
+        self.assertEqual([entry["name"] for entry in snapshot["blendlets"]], ["project_tool"])
+
+    def test_clearing_project_directory_unloads_and_drops_state(self):
+        path = self.project / "brush.py"
+        path.write_text(
+            "def register(ctx):\n"
+            "    ctx.radius = ctx.state.get('radius')\n"
+            "    ctx.state['radius'] = 12.0\n",
+            encoding="utf-8",
+        )
+        self.host.set_project_directory(self.project)
+        self._stable_poll()
+        name = self.host.loaded_blendlet(path).module_name
+        self.host.disable(path)
+
+        self.host.set_project_directory(None)
+        self.assertIsNone(self.host.project_directory)
+        self.assertIsNone(self.host.loaded_blendlet(path))
+        self.assertNotIn(name, sys.modules)
+        self.assertEqual(self.host.disabled_files(), ())
+        stopped = self._status(self.project)
+        self.assertFalse(stopped["host"]["running"])
+        self.assertEqual(stopped["blendlets"], [])
+
+        self.host.set_project_directory(self.project)
+        self._stable_poll()
+        self.assertIsNone(self.host.loaded_blendlet(path).context.radius)
+
+    def test_switching_project_directory_unloads_the_previous_one(self):
+        first = self.project / "first.py"
+        first.write_text(PERSISTENT, encoding="utf-8")
+        other = Path(tempfile.mkdtemp()).resolve() / ".blendlet"
+        other.mkdir()
+        second = other / "second.py"
+        second.write_text(PERSISTENT, encoding="utf-8")
+
+        self.host.set_project_directory(self.project)
+        self._stable_poll()
+        self.host.set_project_directory(other)
+        self._stable_poll()
+
+        self.assertEqual(self.host.project_directory, other)
+        self.assertEqual(_log_lines(first), ["register:first", "unregister:first"])
+        self.assertEqual(_log_lines(second), ["register:second"])
+        self.assertFalse(self._status(self.project)["host"]["running"])
+
+    def test_project_directory_equal_to_user_directory_is_not_watched_twice(self):
+        path = self.user / "tool.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        self.host.set_project_directory(self.user)
+        self._stable_poll()
+        self.assertIsNone(self.host.project_directory)
+        self.assertEqual(self.host.discovered_files(), (path,))
+        self.assertEqual(_log_lines(path), ["register:tool"])
+
+    def test_user_directory_change_hands_over_an_equal_project_directory(self):
+        path = self.project / "tool.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        self.host.set_project_directory(self.project)
+        self._stable_poll()
+
+        self.host.set_blendlets_directory(self.project)
+        self._stable_poll()
+        self.assertIsNone(self.host.project_directory)
+        self.assertEqual(self.host.discovered_files(), (path,))
+        self.assertTrue(self.host.loaded_blendlet(path).persistent)
+
+        self.host.set_blendlets_directory(self.user)
+        self._stable_poll()
+        self.assertEqual(self.host.project_directory, self.project)
+        self.assertTrue(self.host.loaded_blendlet(path).persistent)
+        self.assertEqual(
+            _log_lines(path),
+            [
+                "register:tool",
+                "unregister:tool",
+                "register:tool",
+                "unregister:tool",
+                "register:tool",
+            ],
+        )
+
+    def test_manual_controls_reach_project_blendlets(self):
+        path = self.project / "tool.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        self.host.set_project_directory(self.project)
+        self._stable_poll()
+        self.host.disable(path)
+        self.assertEqual(self._status(self.project)["blendlets"][0]["state"], "disabled")
+        self.assertEqual(self._status(self.user)["blendlets"], [])
+        self.host.reload_all()
+        self.assertFalse(self.host.is_disabled(path))
+        self.assertTrue(self.host.loaded_blendlet(path).persistent)
+        path.write_text(PERSISTENT + "\nMARKER = 5\n", encoding="utf-8")
+        self.assertEqual(self.host.reload_now(path).module.MARKER, 5)
+        self.clock.advance(DEFAULT_DEBOUNCE_SECONDS)
+        self.assertEqual(self.host.poll(), [])
+
+    def test_stop_unloads_project_blendlets_and_forgets_the_directory(self):
+        path = self.project / "tool.py"
+        path.write_text(PERSISTENT, encoding="utf-8")
+        self.host.set_project_directory(self.project)
+        self._stable_poll()
+        self.host.stop()
+        self.assertIsNone(self.host.project_directory)
+        self.assertEqual(_log_lines(path), ["register:tool", "unregister:tool"])
+        self.assertFalse(self._status(self.project)["host"]["running"])
+
+        self.host.start(
+            self.user,
+            clock=self.clock,
+            debounce_seconds=DEFAULT_DEBOUNCE_SECONDS,
+        )
+        self._stable_poll()
+        self.assertIsNone(self.host.project_directory)
+        self.assertEqual(_log_lines(path), ["register:tool", "unregister:tool"])
+
+    def test_set_project_directory_validates_input(self):
+        with self.assertRaises(ValueError):
+            self.host.set_project_directory(Path("relative"))
+        self.host.stop()
+        with self.assertRaises(RuntimeError):
+            self.host.set_project_directory(self.project)
 

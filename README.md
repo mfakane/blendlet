@@ -29,6 +29,17 @@ whether the latest edit loaded, failed, or is disabled, and the latest reload
 error. Reload or enable/disable a tool from there. The configured blendlets
 directory is shown and can be opened in the file browser.
 
+A saved ``.blend`` file can also carry its own blendlets in a ``.blendlet``
+folder beside it. Because a blendlet is arbitrary Python and a ``.blend`` file
+can come from anywhere, an unknown folder is never loaded automatically: the
+sidebar lists its files with **Trust for Now** (until Blender quits or the
+add-on is disabled) and **Trust and Remember** (kept in the add-on
+preferences, saved with them). Trust is per folder path. Remembered folders
+are listed in the add-on preferences, where removing one unloads its
+blendlets. Opening or saving to another ``.blend`` file unloads the previous
+folder's blendlets and drops their ``ctx.state``. A folder that equals the
+configured blendlets directory is treated as that directory.
+
 A blendlet is a top-level ``.py`` file in that directory. Persistent tools
 define ``register(ctx)`` and may define ``unregister(ctx)``. One-shot scripts
 define ``run(ctx)`` instead; they execute on create/modify and are not kept as
@@ -55,7 +66,7 @@ that restoration succeeds. Failures keep an exception and traceback on the
 loaded record.
 
 The host writes machine-readable status to
-``<blendlets-directory>/.blendlet/status.json`` so a coding agent can drop a
+``<blendlets-directory>/.blendlet-status/status.json`` so a coding agent can drop a
 ``.py`` file, wait for the debounce window, and tell whether the latest
 contents loaded. ``file_hash`` is the SHA-256 of the last attempted source
 (or of a still-debouncing write). ``state`` is ``reloading``, ``loaded``,
@@ -63,7 +74,12 @@ contents loaded. ``file_hash`` is the SHA-256 of the last attempted source
 ``last_good`` is true, ``active`` is true, ``file_hash`` is the failed
 candidate, and ``active_hash`` is the running last-good source. Tracebacks
 are in the JSON ``error`` object and in
-``.blendlet/errors/<name>.txt``.
+``.blendlet-status/errors/<name>.txt``. A trusted ``.blendlet`` folder beside a
+``.blend`` file gets its own
+``<blend-folder>/.blendlet/.blendlet-status/status.json``; nothing is written
+to an untrusted folder. Each ``.blendlet-status`` folder contains a
+``.gitignore`` that ignores everything in it, so the output stays out of
+version control.
 
 ```python
 import bpy

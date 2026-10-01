@@ -1,8 +1,10 @@
 """Machine-readable host status for coding agents.
 
 The hot-reload loop is observable from files under the blendlets directory,
-without an MCP server. The host writes ``.blendlet/status.json`` atomically and
-mirrors the latest traceback to ``.blendlet/errors/<name>.txt``.
+without an MCP server. The host writes ``.blendlet-status/status.json``
+atomically and mirrors the latest traceback to
+``.blendlet-status/errors/<name>.txt``. A ``.gitignore`` in that folder keeps
+the output out of version control.
 """
 
 from __future__ import annotations
@@ -28,9 +30,10 @@ STATE_LABELS = {
 ERROR_PREVIEW_LINES = 16
 
 SCHEMA_VERSION = 1
-STATUS_DIRNAME = ".blendlet"
+STATUS_DIRNAME = ".blendlet-status"
 STATUS_FILENAME = "status.json"
 ERRORS_DIRNAME = "errors"
+GITIGNORE_TEXT = "# Created by Blendlet automatically.\n*\n"
 
 
 def status_directory(blendlets_directory: Path) -> Path:
@@ -161,6 +164,9 @@ def write_status(
         return path, signature, False
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     atomic_write_text(path, text)
+    gitignore = status_directory(blendlets_directory) / ".gitignore"
+    if not gitignore.exists():
+        atomic_write_text(gitignore, GITIGNORE_TEXT)
     _sync_error_files(blendlets_directory, payload["blendlets"])
     return path, signature, True
 

@@ -4,7 +4,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from blendlet.paths import default_blendlets_directory, resolve_blendlets_directory
+from blendlet.paths import (
+    default_blendlets_directory,
+    project_blendlets_directory,
+    resolve_blendlets_directory,
+)
+
+
+class ProjectBlendletsDirectoryTests(unittest.TestCase):
+    def test_unsaved_file_has_no_project_directory(self):
+        self.assertIsNone(project_blendlets_directory(""))
+
+    def test_project_directory_is_beside_the_blend_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blend = Path(tmp) / "scene.blend"
+            self.assertEqual(
+                project_blendlets_directory(str(blend)),
+                (Path(tmp) / ".blendlet").resolve(),
+            )
 
 
 class ResolveBlendletsDirectoryTests(unittest.TestCase):

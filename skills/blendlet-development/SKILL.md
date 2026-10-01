@@ -10,6 +10,11 @@ Use the repository implementation as the contract. Treat each top-level,
 non-hidden `.py` file in the configured directory as one blendlet. The default
 directory is `~/blendlets`; use ordinary `bpy`, not a custom DSL.
 
+A saved `.blend` file may also have project blendlets in a `.blendlet` folder
+beside it. That folder loads only after a human presses **Trust for Now** or
+**Trust and Remember** in the sidebar. Never trust it on the user's behalf
+(for example by calling the trust operator or editing preferences); ask them.
+
 ## Choose the execution contract
 
 - Define `register(ctx)` for a persistent tool. It remains loaded until the
@@ -87,8 +92,10 @@ in `ctx.state`.
 
 ## Observe hot reload
 
-Poll `<blendlets-directory>/.blendlet/status.json`; do not infer usability from
-one sleep or from a successful file write. The watcher debounce is currently
+Poll `<blendlets-directory>/.blendlet-status/status.json`; do not infer
+usability from one sleep or from a successful file write. For a trusted project
+folder the blendlets directory is `<blend-folder>/.blendlet`, so its status is
+`<blend-folder>/.blendlet/.blendlet-status/status.json`. The watcher debounce is currently
 `0.4` seconds and the host timer polls every `0.2` seconds, so repeatedly poll
 until the relevant state and hash settle.
 
@@ -96,7 +103,7 @@ The JSON has `schema_version: 1`, `host.running`,
 `host.blendlets_directory`, and `blendlets` entries. Each entry includes
 `name`, `path`, `state`, `kind`, `file_hash`, `active_hash`, `generation`,
 `updated_at`, `active`, `last_good`, and `error`. Error tracebacks also live at
-`.blendlet/errors/<stem>.txt`.
+`.blendlet-status/errors/<stem>.txt`.
 
 Treat success as follows:
 
@@ -125,11 +132,14 @@ remains usable after a failed candidate. Status alone is not a UX test.
 ## Troubleshoot
 
 - **Import or register failure:** read `error` and
-  `.blendlet/errors/<stem>.txt`; fix the traceback, then change the source (or
+  `.blendlet-status/errors/<stem>.txt`; fix the traceback, then change the source (or
   manually reload). An unchanged failed hash is intentionally not retried.
 - **Stale or missing status:** confirm `host.running`, the configured absolute
-  directory, the `.blendlet` directory permissions, and that polling has
+  directory, the `.blendlet-status` directory permissions, and that polling has
   crossed both debounce and host-timer intervals.
+- **Project folder never loads:** the host writes no status into an untrusted
+  folder. Confirm the `.blend` file is saved in the expected folder, then ask
+  the human to trust it in the sidebar.
 - **Wrong path:** inspect `host.blendlets_directory`; only top-level,
   non-hidden `.py` files there are discovered. The empty preference means
   `~/blendlets`.

@@ -156,7 +156,7 @@ def main() -> None:
         host.persistent_files() == (persistent,),
         f"persistent files should be {(persistent,)}, got {host.persistent_files()}",
     )
-    status_path = custom / ".blendlet" / "status.json"
+    status_path = custom / ".blendlet-status" / "status.json"
     _assert(status_path.is_file(), "status.json should exist after a successful load")
     marker_status = _status_entry(status_path, "marker")
     _assert(marker_status["state"] == "loaded", f"expected loaded, got {marker_status}")
@@ -311,7 +311,7 @@ def main() -> None:
         owned_row[0]["error"] is not None and "SyntaxError" in owned_row[0]["error"]["traceback"],
         f"sidebar snapshot should include traceback, got {owned_row[0]}",
     )
-    owned_error = custom / ".blendlet" / "errors" / "owned.txt"
+    owned_error = custom / ".blendlet-status" / "errors" / "owned.txt"
     _assert(owned_error.is_file(), "syntax-failed reload should write an error sidecar")
     _assert(
         "SyntaxError" in owned_error.read_text(encoding="utf-8"),

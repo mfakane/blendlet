@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,15 @@ from .lifecycle import Blendlet, Lifecycle
 from .status import build_status, write_status
 
 
+@dataclass
+class _Source:
+    """One watched blendlets directory and its status-file bookkeeping."""
+
+    directory: Path
+    watcher: Watcher
+    status_signature: str | None = None
+
+
 class Host:
     """Process-wide host for discovery and blendlet module lifecycle.
 
@@ -27,22 +37,28 @@ class Host:
     stopped with the host; file events load, reload, or unload modules, and
     are also delivered on the Blender timer thread via ``subscribe``.
     Per-blendlet ``ctx.state`` is dropped on ``stop()`` and on file deletion.
-    After each poll the host writes ``.blendlet/status.json`` so an external
+    After each poll the host writes ``.blendlet-status/status.json`` so an external
     agent can observe load success and reload errors from files alone.
     Disabled blendlets stay discovered but are not auto-loaded until enabled
     or manually reloaded. Disable is in-memory for the current host run.
+
+    Besides the user blendlets directory, the host can watch one project
+    directory (the ``.blendlet`` folder beside the open .blend file). The host
+    does not decide trust: callers pass only a directory the user trusted.
+    Each watched directory gets its own ``.blendlet-status/status.json``.
     """
 
     def __init__(self) -> None:
         self._running = False
-        self._blendlets_directory: Path | None = None
-        self._watcher: Watcher | None = None
+        self._user: _Source | None = None
+        self._project: _Source | None = None
+        self._project_request: Path | None = None
         self._lifecycle: Lifecycle | None = None
         self._listeners: list[Callable[[FileChange], None]] = []
         self._timer: Callable[[], float | None] | None = None
         self._poll_interval = DEFAULT_POLL_INTERVAL_SECONDS
         self._debounce_seconds = DEFAULT_DEBOUNCE_SECONDS
-        self._status_signature: str | None = None
+        self._clock: Callable[[], float] | None = None
         self._disabled: set[Path] = set()
 
     @property
@@ -51,16 +67,24 @@ class Host:
 
     @property
     def watching(self) -> bool:
-        return self._watcher is not None
+        return self._user is not None
 
     @property
     def blendlets_directory(self) -> Path | None:
-        return self._blendlets_directory
+        return None if self._user is None else self._user.directory
+
+    @property
+    def project_directory(self) -> Path | None:
+        """The trusted project directory being watched, if any.
+
+        A requested project directory equal to the user directory is not
+        watched twice, so this is None in that case.
+        """
+        return None if self._project is None else self._project.directory
 
     def discovered_files(self) -> tuple[Path, ...]:
-        if self._watcher is None:
-            return ()
-        return self._watcher.known_files()
+        files = [path for source in self._sources() for path in source.watcher.known_files()]
+        return tuple(sorted(files, key=lambda path: path.as_posix()))
 
     def persistent_files(self) -> tuple[Path, ...]:
         if self._lifecycle is None:
@@ -82,25 +106,14 @@ class Host:
         self._listeners.append(callback)
 
     def status_snapshot(self) -> dict:
-        directory = self._blendlets_directory
-        if directory is None:
-            directory = Path()
-        if self._running and self._lifecycle is not None:
-            records = self._lifecycle.blendlets()
-        else:
-            records = ()
-        if self._running and self._watcher is not None:
-            pending = self._watcher.pending_files()
-        else:
-            pending = ()
-        return build_status(
-            blendlets_directory=directory,
-            running=self._running,
-            records=records,
-            pending=pending,
-            disabled=self.disabled_files() if self._running else (),
-            now=datetime.now(timezone.utc),
-        )
+        """Status of the user blendlets directory."""
+        return self._snapshot(self._user)
+
+    def project_status_snapshot(self) -> dict | None:
+        """Status of the watched project directory, or None when there is none."""
+        if self._project is None:
+            return None
+        return self._snapshot(self._project)
 
     def start(
         self,
@@ -115,20 +128,15 @@ class Host:
         directory = Path(blendlets_directory)
         if not directory.is_absolute():
             raise ValueError("blendlets directory must be an absolute path")
-        self._blendlets_directory = directory
         if debounce_seconds is not None:
             self._debounce_seconds = debounce_seconds
         if poll_interval is not None:
             self._poll_interval = poll_interval
-        self._watcher = Watcher(
-            directory,
-            debounce_seconds=self._debounce_seconds,
-            clock=clock,
-        )
+        self._clock = clock
+        self._user = self._new_source(directory)
         self._lifecycle = Lifecycle()
         self._disabled = set()
         self._running = True
-        self._status_signature = None
         self._register_timer()
         self._write_status()
         self.poll()
@@ -140,42 +148,57 @@ class Host:
         if self._lifecycle is not None:
             self._lifecycle.unload_all()
             self._lifecycle = None
-        self._write_status(running=False)
-        if self._watcher is not None:
-            self._watcher.clear()
-            self._watcher = None
+        for source in self._sources():
+            _write_stopped_status(source.directory)
+            source.watcher.clear()
+        self._user = None
+        self._project = None
+        self._project_request = None
         self._disabled = set()
-        self._cleanup()
         self._running = False
-        self._status_signature = None
 
     def set_blendlets_directory(self, blendlets_directory: Path) -> None:
         directory = Path(blendlets_directory)
         if not directory.is_absolute():
             raise ValueError("blendlets directory must be an absolute path")
-        if not self._running or self._watcher is None:
+        if not self._running or self._user is None:
             raise RuntimeError("host is not running")
-        if directory == self._blendlets_directory:
+        if directory == self._user.directory:
             return
-        previous = self._blendlets_directory
-        changes = self._watcher.set_directory(directory)
-        if previous is not None and previous != directory:
-            self._write_status(
-                directory=previous,
-                running=False,
-                records=(),
-                pending=(),
-                disabled=(),
-            )
-        self._blendlets_directory = directory
-        self._status_signature = None
+        if self.project_directory == directory:
+            self._detach_project()
+        previous = self._user.directory
+        changes = self._user.watcher.set_directory(directory)
+        _write_stopped_status(previous)
+        self._user.directory = directory
+        self._user.status_signature = None
         self._dispatch(changes)
+        self._sync_project()
+        self.poll()
+
+    def set_project_directory(self, directory: Path | None) -> None:
+        """Watch a trusted project directory, or stop watching it with None.
+
+        Leaving a project directory unloads its blendlets and drops their
+        ``ctx.state``, like deleting the files.
+        """
+        if directory is not None:
+            directory = Path(directory)
+            if not directory.is_absolute():
+                raise ValueError("project directory must be an absolute path")
+        self._require_running()
+        if directory == self._project_request:
+            return
+        self._project_request = directory
+        self._sync_project()
         self.poll()
 
     def poll(self) -> list[FileChange]:
-        if not self._running or self._watcher is None:
+        if not self._running:
             return []
-        changes = self._watcher.poll()
+        changes: list[FileChange] = []
+        for source in self._sources():
+            changes.extend(source.watcher.poll())
         self._dispatch(changes)
         self._write_status()
         _tag_ui_redraw()
@@ -194,8 +217,8 @@ class Host:
         self._require_running()
         assert self._lifecycle is not None
         paths = set(self.discovered_files())
-        if self._watcher is not None:
-            for item in self._watcher.pending_files():
+        for source in self._sources():
+            for item in source.watcher.pending_files():
                 paths.add(item.path)
         self._disabled.clear()
         for path in sorted(paths, key=lambda item: item.as_posix()):
@@ -236,12 +259,54 @@ class Host:
         if not self._running or self._lifecycle is None:
             raise RuntimeError("host is not running")
 
+    def _sources(self) -> tuple[_Source, ...]:
+        return tuple(source for source in (self._user, self._project) if source is not None)
+
+    def _source_for(self, path: Path) -> _Source | None:
+        """The project source for files directly in it; the user source otherwise."""
+        if self._project is not None and Path(path).parent == self._project.directory:
+            return self._project
+        return self._user
+
+    def _new_source(self, directory: Path) -> _Source:
+        watcher = Watcher(
+            directory,
+            debounce_seconds=self._debounce_seconds,
+            clock=self._clock,
+        )
+        return _Source(directory=directory, watcher=watcher)
+
+    def _sync_project(self) -> None:
+        wanted = self._project_request
+        if self._user is not None and wanted == self._user.directory:
+            wanted = None
+        if wanted == self.project_directory:
+            return
+        self._detach_project()
+        if wanted is not None:
+            self._project = self._new_source(wanted)
+
+    def _detach_project(self) -> None:
+        source = self._project
+        if source is None:
+            return
+        changes = [
+            FileChange(kind=ChangeKind.DELETED, path=path)
+            for path in source.watcher.known_files()
+        ]
+        source.watcher.clear()
+        self._dispatch(changes)
+        self._disabled = {path for path in self._disabled if path.parent != source.directory}
+        self._project = None
+        _write_stopped_status(source.directory)
+
     def _reload_path(self, path: Path) -> Blendlet | None:
         assert self._lifecycle is not None
         path = Path(path)
         self._disabled.discard(path)
-        if self._watcher is not None:
-            self._watcher.acknowledge(path)
+        source = self._source_for(path)
+        if source is not None:
+            source.watcher.acknowledge(path)
         if not path.is_file():
             self._lifecycle.unload(path, forget_state=True)
             return None
@@ -292,48 +357,60 @@ class Host:
         if bpy.app.timers.is_registered(timer):
             bpy.app.timers.unregister(timer)
 
-    def _cleanup(self) -> None:
-        self._blendlets_directory = None
-
-    def _write_status(
+    def _source_parts(
         self,
-        *,
-        directory: Path | None = None,
-        running: bool | None = None,
-        records: tuple[Blendlet, ...] | None = None,
-        pending: tuple[PendingFile, ...] | None = None,
-        disabled: tuple[Path, ...] | None = None,
-    ) -> None:
-        target = directory if directory is not None else self._blendlets_directory
-        if target is None:
+        source: _Source,
+    ) -> tuple[tuple[Blendlet, ...], tuple[PendingFile, ...], tuple[Path, ...]]:
+        assert self._lifecycle is not None
+        records = tuple(
+            record
+            for record in self._lifecycle.blendlets()
+            if self._source_for(record.path) is source
+        )
+        disabled = tuple(
+            path for path in self.disabled_files() if self._source_for(path) is source
+        )
+        return records, source.watcher.pending_files(), disabled
+
+    def _snapshot(self, source: _Source | None) -> dict:
+        now = datetime.now(timezone.utc)
+        if not self._running or source is None or self._lifecycle is None:
+            return build_status(blendlets_directory=Path(), running=False, now=now)
+        records, pending, disabled = self._source_parts(source)
+        return build_status(
+            blendlets_directory=source.directory,
+            running=True,
+            records=records,
+            pending=pending,
+            disabled=disabled,
+            now=now,
+        )
+
+    def _write_status(self) -> None:
+        if not self._running or self._lifecycle is None:
             return
-        is_running = self._running if running is None else running
-        if records is None:
-            if is_running and self._lifecycle is not None:
-                records = self._lifecycle.blendlets()
-            else:
-                records = ()
-        if pending is None:
-            if is_running and self._watcher is not None:
-                pending = self._watcher.pending_files()
-            else:
-                pending = ()
-        if disabled is None:
-            disabled = self.disabled_files() if is_running else ()
-        try:
-            _path, signature, _written = write_status(
-                target,
-                running=is_running,
-                records=records,
-                pending=pending,
-                disabled=disabled,
-                now=datetime.now(timezone.utc),
-                previous_signature=self._status_signature if directory is None else None,
-            )
-        except OSError:
-            return
-        if directory is None:
-            self._status_signature = signature
+        for source in self._sources():
+            records, pending, disabled = self._source_parts(source)
+            try:
+                _path, signature, _written = write_status(
+                    source.directory,
+                    running=True,
+                    records=records,
+                    pending=pending,
+                    disabled=disabled,
+                    now=datetime.now(timezone.utc),
+                    previous_signature=source.status_signature,
+                )
+            except OSError:
+                continue
+            source.status_signature = signature
+
+
+def _write_stopped_status(directory: Path) -> None:
+    try:
+        write_status(directory, running=False, now=datetime.now(timezone.utc))
+    except OSError:
+        pass
 
 
 def _tag_ui_redraw() -> None:
