@@ -1,108 +1,113 @@
 # Blendlet
 
-Hot-reloadable micro-tool host for Blender. A blendlet is a small Python file
-that can grow into a reusable tool without restarting Blender.
+Grow small Blender tools without restarting Blender.
 
-This repository currently bootstraps the host add-on: package metadata,
-blendlets-directory preferences, a start/stop lifecycle, discovery of
-top-level ``.py`` blendlets with debounced create/modify/delete events, and
-the module execution contract (``register(ctx)``, optional ``unregister(ctx)``,
-and transient ``run(ctx)``).
+A blendlet is a single Python file. Drop it into a folder and Blendlet loads
+it; save an edit and it reloads in place. Buttons, shortcuts, and viewport
+overlays it registered are cleaned up and registered again, so nothing gets
+duplicated. If an edit breaks, the last working version keeps running.
+
+It also works well with coding agents: an agent can write a blendlet and read
+a status file to see whether it loaded, without driving Blender itself.
 
 ## Install
 
 Requires Blender 4.2 or later.
 
-```text
-blender --command extension build --source-dir src/blendlet --output-dir dist
-```
+1. Build the extension zip (see [Development](docs/development.md)).
+2. In Blender, open *Edit → Preferences → Extensions → Install from Disk* and
+   choose `blendlet-0.1.0.zip`.
+3. Enable **Blendlet**. Blendlets are read from `~/blendlets` unless you set
+   **Blendlets Directory** in the add-on preferences.
 
-In Blender: *Edit → Preferences → Extensions → Install from Disk* and choose
-the built `blendlet-0.1.0.zip`. Enable the add-on, then set **Blendlets
-Directory** in its preferences. An empty value resolves to `~/blendlets`.
+## Your first blendlet
 
-Disable the add-on to stop the host. Enable it again without restarting Blender
-to start it with the current preferences.
-
-The 3D View sidebar (N-panel, **Blendlet** tab) lists discovered blendlets,
-whether the latest edit loaded, failed, or is disabled, and the latest reload
-error. Reload or enable/disable a tool from there. The configured blendlets
-directory is shown and can be opened in the file browser.
-
-A saved ``.blend`` file can also carry its own blendlets in a ``.blendlet``
-folder beside it. Because a blendlet is arbitrary Python and a ``.blend`` file
-can come from anywhere, an unknown folder is never loaded automatically: the
-sidebar lists its files with **Trust for Now** (until Blender quits or the
-add-on is disabled) and **Trust and Remember** (kept in the add-on
-preferences, saved with them). Trust is per folder path. Remembered folders
-are listed in the add-on preferences, where removing one unloads its
-blendlets. Opening or saving to another ``.blend`` file unloads the previous
-folder's blendlets and drops their ``ctx.state``. A folder that equals the
-configured blendlets directory is treated as that directory.
-
-A blendlet is a top-level ``.py`` file in that directory. Persistent tools
-define ``register(ctx)`` and may define ``unregister(ctx)``. One-shot scripts
-define ``run(ctx)`` instead; they execute on create/modify and are not kept as
-loaded add-ons. Ordinary ``bpy`` remains available.
-
-For the development workflow, examples, status contract, and troubleshooting,
-see [`skills/blendlet-development/SKILL.md`](skills/blendlet-development/SKILL.md).
-
-Register Blender resources through ``ctx`` so reload, delete, and add-on
-disable undo them automatically. A simple blendlet does not need
-``unregister()`` merely to tear down those resources. ``ctx.dispose()`` is
-idempotent and still runs after an optional ``unregister(ctx)``.
-
-``ctx.state`` is a host-owned dict for small values such as a brush radius.
-It is keyed by blendlet path, so two files cannot share a slot. Values
-survive a hot reload of that file. Deleting the file, disabling the add-on,
-or restarting Blender drops the slot. v0.1 storage is in-memory; do not
-keep module-defined objects there.
-
-A syntax or import error while a persistent tool is already loaded keeps that
-last working version active. If the candidate imports but ``register()`` fails
-after the old version is disposed, the last working version is restored when
-that restoration succeeds. Failures keep an exception and traceback on the
-loaded record.
-
-The host writes machine-readable status to
-``<blendlets-directory>/.blendlet-status/status.json`` so a coding agent can drop a
-``.py`` file, wait for the debounce window, and tell whether the latest
-contents loaded. ``file_hash`` is the SHA-256 of the last attempted source
-(or of a still-debouncing write). ``state`` is ``reloading``, ``loaded``,
-``ran``, or ``error``. When a reload fails and last-good stays active,
-``last_good`` is true, ``active`` is true, ``file_hash`` is the failed
-candidate, and ``active_hash`` is the running last-good source. Tracebacks
-are in the JSON ``error`` object and in
-``.blendlet-status/errors/<name>.txt``. A trusted ``.blendlet`` folder beside a
-``.blend`` file gets its own
-``<blend-folder>/.blendlet/.blendlet-status/status.json``; nothing is written
-to an untrusted folder. Each ``.blendlet-status`` folder contains a
-``.gitignore`` that ignores everything in it, so the output stays out of
-version control.
+Save this as `~/blendlets/hello.py`:
 
 ```python
 import bpy
 
 
+class BLENDLET_OT_hello(bpy.types.Operator):
+    bl_idname = "blendlet.hello"
+    bl_label = "Say Hello"
+
+    def execute(self, context):
+        self.report({"INFO"}, "Hello from a blendlet")
+        return {"FINISHED"}
+
+
+class BLENDLET_PT_hello(bpy.types.Panel):
+    bl_label = "Hello"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Hello"
+
+    def draw(self, context):
+        self.layout.operator(BLENDLET_OT_hello.bl_idname)
+
+
 def register(ctx):
-    ctx.register_class(MyOperator)
-    ctx.add_timer(tick, persistent=True)
-    km = ctx.add_keymap("3D View", space_type="VIEW_3D")
-    ctx.add_keymap_item(km, "mesh.knife_tool", type="K")
-    ctx.add_draw_handler(bpy.types.SpaceView3D, draw, ())
-    ctx.add_handler(bpy.app.handlers.depsgraph_update_post, on_update)
-    radius = ctx.state.get("radius", 8.0)
-    ctx.state["radius"] = radius
+    ctx.register_class(BLENDLET_OT_hello)
+    ctx.register_class(BLENDLET_PT_hello)
 ```
 
-## Tests
+A **Hello** tab appears in the 3D View sidebar (press `N`). Change the label or
+message and save; the panel updates within a second. Delete the file and the
+tab disappears.
+
+A file with `run(ctx)` instead of `register(ctx)` is a one-shot script: it runs
+each time you save it and is not kept loaded.
+
+See [Writing blendlets](docs/writing-blendlets.md) for timers, shortcuts,
+draw handlers, values that survive reloads, and what happens when a reload
+fails.
+
+## The Blendlet panel
+
+The **Blendlet** tab in the 3D View sidebar lists every blendlet with whether
+its latest edit loaded or failed. From there you can:
+
+- **Reload** a blendlet, or **Reload All**
+- **Disable** a blendlet without deleting the file, and **Enable** it again
+- read the error of a failed reload and **Copy Error** to the clipboard
+- open the blendlets folder
+
+## Blendlets that travel with a .blend file
+
+A `.blend` file can bring its own tools: put blendlets in a `.blendlet` folder
+next to the saved file.
 
 ```text
-uv sync
-uv run python -m unittest discover -s tests -v
+my-project/
+├── scene.blend
+└── .blendlet/
+    └── rig_helpers.py
 ```
 
-If Blender is on `PATH` (or `BLENDER` points at `blender.exe`), the suite also
-validates the extension package and runs host lifecycle and status-panel checks
-in a background Blender process (`blender --background --factory-startup`).
+A blendlet can run any Python code, and a `.blend` file can come from anyone,
+so Blendlet never loads a folder it does not know. The panel lists its files
+and asks first:
+
+- **Trust for Now** loads them until Blender quits or the add-on is disabled.
+- **Trust and Remember** also keeps trusting that folder in later sessions.
+  Remembered folders are listed in the add-on preferences, where you can remove
+  them again.
+
+Trust belongs to the folder's location, not its contents, so only remember
+folders whose contents you control. Opening another `.blend` file unloads the
+previous file's blendlets.
+
+## Using a coding agent
+
+Point the agent at
+[`skills/blendlet-development/SKILL.md`](skills/blendlet-development/SKILL.md).
+It explains how to write blendlets and how to confirm a load through
+[the status file](docs/status.md). Trusting a project folder stays a human
+decision.
+
+## Documentation
+
+- [Writing blendlets](docs/writing-blendlets.md)
+- [Status file for agents and scripts](docs/status.md)
+- [Development](docs/development.md)
