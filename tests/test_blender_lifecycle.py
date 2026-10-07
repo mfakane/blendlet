@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ADDON_DIR = REPO_ROOT / "src" / "blendlet"
 HARNESS = REPO_ROOT / "tests" / "blender_harness.py"
 UI_HARNESS = REPO_ROOT / "tests" / "blender_ui_harness.py"
+EXAMPLES_HARNESS = REPO_ROOT / "tests" / "blender_examples_harness.py"
 INSTALL_HARNESS = REPO_ROOT / "tests" / "blender_install_harness.py"
 
 
@@ -108,6 +109,24 @@ class BlenderHostLifecycleTests(unittest.TestCase):
             f"blender lifecycle harness failed:\n{output}",
         )
         self.assertIn("BLENDLET_LIFECYCLE_OK", result.stdout)
+
+    def test_examples_load_and_work_in_background_blender(self):
+        result = _run(
+            [
+                str(self.blender),
+                "--background",
+                "--factory-startup",
+                "--python",
+                str(EXAMPLES_HARNESS),
+            ]
+        )
+        output = f"{result.stdout}\n{result.stderr}"
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"blender examples harness failed:\n{output}",
+        )
+        self.assertIn("BLENDLET_EXAMPLES_OK", result.stdout)
 
     def test_status_panel_and_operators_in_background_blender(self):
         result = _run(

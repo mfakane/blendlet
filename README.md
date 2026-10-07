@@ -63,6 +63,15 @@ See [Writing blendlets](docs/writing-blendlets.md) for timers, shortcuts,
 draw handlers, values that survive reloads, and what happens when a reload
 fails.
 
+## Examples
+
+Copy a file from [`examples/`](examples/) into your blendlets folder to try it.
+
+- [`relax_brush.py`](examples/relax_brush.py) — a brush for Edit Mode meshes
+  and the UV Editor that untangles vertices and evens quads out toward
+  rectangles. Press Shift+Alt+R or use the **Relax** sidebar tab, drag to
+  relax, Ctrl/Shift+Wheel for radius/strength, right click to finish.
+
 ## The Blendlet panel
 
 The **Blendlet** tab in the 3D View sidebar lists every blendlet with whether
